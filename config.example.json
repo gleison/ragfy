@@ -1,0 +1,18 @@
+{
+  "purpose": "Remember the material that helps with my work",
+  "sources": ["documents"],
+  "documents": {
+    "roots": [{"area": "documents", "path": "~/Documents/Knowledge", "glob": "**/*"}],
+    "max_file_mb": 40
+  },
+  "obsidian": {"vaults": [], "default_area": "notes", "skip_folders": ["Templates", "Attachments"], "max_file_mb": 5},
+  "youtube": {"urls": []},
+  "transcripts": {"per_run": 100, "min_kb": 50, "settle_hours": 6, "window_hours": 30, "workers": 4},
+  "codex_sessions": {"paths": []},
+  "vector_backend": "sqlite",
+  "embedding": {"provider": "local", "model": "BAAI/bge-small-en-v1.5"},
+  "privacy": {"local_only": true},
+  "query_distill": {"enabled": false, "provider": "ollama", "ollama_model": "llama3.2", "timeout_s": 4, "max_queries": 3},
+  "retrieval": {"min_similarity": 0.45, "min_top_similarity": 0.5, "limit": 4, "max_per_source": 4, "max_per_parent": 2, "dedupe_similarity": 0.93, "segment_query": true, "kind_boost": 1.35},
+  "schedule": {"enabled": false, "frequency": "none"}
+}

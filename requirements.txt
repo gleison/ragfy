@@ -1,0 +1,9 @@
+openai>=1.40
+numpy>=1.26
+tiktoken>=0.7          # accurate token counts for cost estimates
+pypdf>=4.2             # PDF text extraction
+youtube-transcript-api>=1.0  # explicit YouTube video transcripts
+
+# The public walkthrough defaults to local embeddings. This downloads a model on
+# first use and keeps source text out of embedding APIs.
+sentence-transformers>=3.0

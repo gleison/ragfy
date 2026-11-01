@@ -35,6 +35,7 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+INSTALL_LOG.md
 
 # Unit test / coverage reports
 htmlcov/
@@ -218,3 +219,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# SQLite
+kb.sqlite
+kb.sqlite-*
+
+# Others
+config.json
+*.html
+.zotero_cache.json
