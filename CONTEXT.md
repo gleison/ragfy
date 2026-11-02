@@ -1,18 +1,14 @@
-# How the knowledge base works
+# Ragfy architecture
 
-The knowledge base reads selected material, splits it into short chunks, embeds each chunk, and stores the result. When you send a Claude Code or Codex prompt, `recall.py` searches the stored chunks and prints only the chunks that clear the retrieval thresholds.
+The Go daemon in `cmd/ragfy` is the active runtime. It owns one local SQLite database, one queue worker for session digestion, and a `llama.cpp` runtime through the `go-llama` binding. Hook processes are intentionally short-lived and send JSON to a token-protected loopback API.
 
-```
-selected sources -> chunks -> embeddings -> search index
-your prompt -> recall hook -> relevant chunks -> Claude Code or Codex
-```
+Digest generation tokenizes Qwen ChatML control tokens with `ParseSpecial=true` and uses an empty thinking prefix. Do not use the binding's native completion path for formatted chat prompts: it tokenizes control tokens as ordinary text. Extraction accepts only complete JSON with all four arrays, rejects schema placeholders and transient runtime observations, and requires every record to cite an exact transcript quote. Preference evidence must come from a user message. The MVP gives the model a balanced 6,500-byte excerpt containing the beginning and end of long conversations; the middle is omitted. Inspect extracted content when validating changes, not just document counts or worker completion logs.
 
-SQLite stores the source chunks and vectors in one local file. The hook reads that file when it needs to attach text to a prompt.
+MVP model selections are fixed in the Go app:
 
-The search combines vector similarity with SQLite full-text matching. It applies the existing similarity floors after ranking. A search result must clear the floor, and the best result must clear a higher floor before the hook adds anything to your prompt. An empty result is correct when your sources do not answer the question.
+- `Qwen/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf` for typed transcript extraction.
+- `Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf` for multilingual embeddings, using `last` pooling and an English retrieval instruction on queries.
 
-Long documents are split before embedding. A single vector for a long document averages unrelated sections together. Smaller chunks let retrieval return the passage that contains the answer instead of an entire document.
+The app downloads missing GGUF files into its application data directory and checks their pinned SHA-256 values before loading. It tracks the embedding model version in the repository and re-embeds stored documents when that version changes. `Repository` is the persistence boundary; `SQLiteRepository` is the first implementation. A Supabase adapter is a future extension.
 
-The review checks chunks that were actually injected into Claude Code or Codex. Run `python chunk_review.py --hours 24`, mark each chunk Useful or Junk, and save the review. After three prompts and eight chunks have labels, the system replays those prompts at three, four, and six chunks and writes the smallest relevant limit to `config.json`. This uses your judgment instead of having an AI grade its own answers.
-
-Refreshes run `ingest.py`. Ingestion is idempotent: unchanged chunks keep their existing embeddings, and changed chunks get embedded again. Scheduled refreshes are local jobs, so they run only while your computer is awake.
+`ragfy setup` registers the background service and both `UserPromptSubmit` and `SessionEnd` hooks for Claude Code and Codex. `ragfy ingest <folder>` indexes Markdown, RST, and text files.

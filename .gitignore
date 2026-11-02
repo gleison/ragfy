@@ -224,6 +224,11 @@ __marimo__/
 kb.sqlite
 kb.sqlite-*
 
+# Mason RAG Go service outputs and local state
+/dist/
+memory.sqlite
+memory.sqlite-*
+
 # Others
 config.json
 *.html

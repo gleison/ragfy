@@ -1,0 +1,122 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func readHookConfig(t *testing.T, path string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func hookCommands(t *testing.T, root map[string]any, event string) []map[string]any {
+	t.Helper()
+	hooks, ok := root["hooks"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing hooks object: %#v", root)
+	}
+	entries, _ := hooks[event].([]any)
+	var commands []map[string]any
+	for _, raw := range entries {
+		entry, _ := raw.(map[string]any)
+		children, _ := entry["hooks"].([]any)
+		for _, child := range children {
+			if command, ok := child.(map[string]any); ok {
+				commands = append(commands, command)
+			}
+		}
+	}
+	return commands
+}
+
+func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := `{
+  "description": "keep me",
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks":[{"type":"command","command":"python3 /old/recall.py"}]},
+      {"hooks":[{"type":"command","command":"/usr/local/bin/unrelated"}]}
+    ],
+    "PostToolUse": [{"matcher":"Bash","hooks":[{"type":"command","command":"audit"}]}]
+  }
+}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	exe := "/Applications/Ragfy Tools/ragfy"
+	if err := mergeHookFile(path, exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeHookFile(path, exe); err != nil {
+		t.Fatal(err)
+	}
+
+	root := readHookConfig(t, path)
+	if root["description"] != "keep me" {
+		t.Fatalf("unrelated root data was lost: %#v", root)
+	}
+	commands := hookCommands(t, root, "UserPromptSubmit")
+	recallCommand := `"/Applications/Ragfy Tools/ragfy" hook recall`
+	counts := map[string]int{}
+	for _, command := range commands {
+		value, _ := command["command"].(string)
+		counts[value]++
+		if value == recallCommand && command["timeout"] != float64(4) {
+			t.Fatalf("recall timeout = %#v", command["timeout"])
+		}
+	}
+	if counts["python3 /old/recall.py"] != 0 || counts["/usr/local/bin/unrelated"] != 1 || counts[recallCommand] != 1 {
+		t.Fatalf("unexpected prompt hook commands: %#v", counts)
+	}
+
+	digestCommands := hookCommands(t, root, "SessionEnd")
+	if len(digestCommands) != 1 || digestCommands[0]["command"] != `"/Applications/Ragfy Tools/ragfy" hook digest` || digestCommands[0]["timeout"] != float64(2) {
+		t.Fatalf("unexpected digest hook: %#v", digestCommands)
+	}
+	if len(hookCommands(t, root, "PostToolUse")) != 1 {
+		t.Fatalf("unrelated event was modified: %#v", root)
+	}
+
+	backup, err := os.ReadFile(path + ".ragfy.bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != original {
+		t.Fatal("backup does not contain the original hook file")
+	}
+}
+
+func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	created := filepath.Join(dir, "new", "hooks.json")
+	if err := mergeHookFile(created, "/usr/local/bin/ragfy"); err != nil {
+		t.Fatal(err)
+	}
+	root := readHookConfig(t, created)
+	if len(hookCommands(t, root, "UserPromptSubmit")) != 1 || len(hookCommands(t, root, "SessionEnd")) != 1 {
+		t.Fatalf("new config is incomplete: %#v", root)
+	}
+
+	invalid := filepath.Join(dir, "invalid.json")
+	if err := os.WriteFile(invalid, []byte(`{"hooks":`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeHookFile(invalid, "/usr/local/bin/ragfy"); err == nil {
+		t.Fatal("invalid JSON hook config was accepted")
+	}
+}
