@@ -1,4 +1,4 @@
-package main
+package digest
 
 import (
 	"strings"
@@ -14,7 +14,7 @@ func TestParseRecordsRejectsInvalidExtraction(t *testing.T) {
 	}
 	for name, output := range tests {
 		t.Run(name, func(t *testing.T) {
-			if _, err := parseRecords(output, spine); err == nil {
+			if _, err := ParseRecords(output, spine); err == nil {
 				t.Fatalf("parseRecords accepted invalid output: %s", output)
 			}
 		})
@@ -24,7 +24,7 @@ func TestParseRecordsRejectsInvalidExtraction(t *testing.T) {
 func TestParseRecordsAcceptsGroundedKnowledge(t *testing.T) {
 	spine := "USER: Ragfy runs as a persistent local Go daemon."
 	output := `{"problems":[],"facts":[{"fact":"Ragfy runs as a persistent local Go daemon.","scope":"ragfy runtime","status":"current","evidence":"Ragfy runs as a persistent local Go daemon."}],"preferences":[],"decisions":[]}`
-	docs, err := parseRecords(output, spine)
+	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestParseRecordsRejectsUngroundedAndTransientKnowledge(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			docs, err := parseRecords(tt.output, tt.spine)
+			docs, err := ParseRecords(tt.output, tt.spine)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func TestPreferenceEvidenceCanComeFromLaterUserParagraph(t *testing.T) {
 	spine := "USER: Some context.\n\nAlways keep the README in English.\n\nCODEX: Understood."
 	output := `{"problems":[],"facts":[],"preferences":[{"preference":"Keep project documentation in English.","why":"","applies_to":"README and context","evidence":"Keep the README in English."}],"decisions":[]}`
 	output = strings.Replace(output, "Keep the README in English.", "Always keep the README in English.", 1)
-	docs, err := parseRecords(output, spine)
+	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestPreferenceEvidenceCanComeFromLaterUserParagraph(t *testing.T) {
 func TestParseRecordsRejectsUnrelatedPreferenceAndDuplicateEvidence(t *testing.T) {
 	spine := "USER: The service reloads the model on every hook call.\n\nUSER: The extracted knowledge is not refined enough."
 	output := `{"problems":[{"problem":"The service reloads the model on every hook call.","context":"hooks","solution":"Keep one persistent local service running.","root_cause":"Each hook starts the model runtime again.","evidence":"The service reloads the model on every hook call."}],"facts":[],"preferences":[{"preference":"Use refined documentation conventions.","why":"","applies_to":"documentation","evidence":"The extracted knowledge is not refined enough."}],"decisions":[{"decision":"Keep one persistent local service running.","rejected":"Reload per hook","why":"Avoid repeated startup","evidence":"The service reloads the model on every hook call."}]}`
-	docs, err := parseRecords(output, spine)
+	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestTranscriptSpineExcludesContaminatedExamplesAndBalancesLongText(t *testi
 		`{"type":"event_msg","payload":{"type":"user_message","message":"` + strings.Repeat("middle content ", 40) + `"}}`,
 		`{"type":"event_msg","payload":{"type":"user_message","message":"The final confirmed behavior must remain visible."}}`,
 	}, "\n"))
-	spine := transcriptSpine(data, 300)
+	spine := TranscriptSpine(data, 300)
 	if strings.Contains(spine, "durable self-contained state") {
 		t.Fatalf("contaminated example remained in spine: %s", spine)
 	}
@@ -129,7 +129,7 @@ func TestTranscriptSpineSupportsCodexAndClaudeMessageFormats(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"function_call","role":"assistant","content":"ignored call"}}`,
 		`not-json`,
 	}, "\n"))
-	spine := transcriptSpine(data, 5000)
+	spine := TranscriptSpine(data, 5000)
 	for _, want := range []string{
 		"USER: Claude user message",
 		"CLAUDE: Claude assistant message",
@@ -158,19 +158,6 @@ func TestTranscriptTextAcceptsSupportedTextBlocksOnly(t *testing.T) {
 	}
 	if got := transcriptText(map[string]any{"text": "unsupported"}); got != "" {
 		t.Fatalf("unsupported content = %q", got)
-	}
-}
-
-func TestTokenChunksNeverExceedBatchSize(t *testing.T) {
-	chunks := tokenChunks(2897, 2048)
-	want := [][2]int{{0, 2048}, {2048, 2897}}
-	if len(chunks) != len(want) {
-		t.Fatalf("got %d chunks, want %d: %#v", len(chunks), len(want), chunks)
-	}
-	for i := range want {
-		if chunks[i] != want[i] {
-			t.Fatalf("chunk %d = %#v, want %#v", i, chunks[i], want[i])
-		}
 	}
 }
 

@@ -1,4 +1,4 @@
-package main
+package digest
 
 import (
 	"bufio"
@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"ragfy/internal/knowledge"
 )
 
 type extracted struct {
@@ -49,7 +51,7 @@ type transcriptMessage struct {
 	source  string
 }
 
-func digestPrompt(project, spine string) string {
+func Prompt(project, spine string) string {
 	return fmt.Sprintf(`Extract high-value durable knowledge from this coding-assistant session transcript. Return only a JSON object with exactly four arrays: problems, facts, preferences, decisions. Use [] when none apply, extract at most 1 record per array, and never duplicate the same knowledge across categories. Do not include reasoning, markdown fences, or text outside the JSON object. Start with { and end with }.
 
 Every record must include evidence: an exact, contiguous transcript quote that directly supports the record's central claim. Prefer a longer quote when needed to support the complete claim. Write the record in the same language as its evidence.
@@ -68,7 +70,7 @@ Transcript:
 Return the JSON object now.`, project, spine)
 }
 
-func transcriptSpine(data []byte, capChars int) string {
+func TranscriptSpine(data []byte, capChars int) string {
 	var out []string
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
@@ -183,7 +185,7 @@ func transcriptText(content any) string {
 	return strings.Join(parts, "\n")
 }
 
-func parseRecords(text, spine string) ([]Document, error) {
+func ParseRecords(text, spine string) ([]knowledge.Document, error) {
 	var data extracted
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "~~~") {
@@ -240,7 +242,7 @@ func parseRecords(text, spine string) ([]Document, error) {
 		return nil, errors.New("model echoed schema placeholders")
 	}
 
-	var result []Document
+	var result []knowledge.Document
 	usedEvidence := make(map[string]struct{})
 	add := func(kind, title, body, evidence string) {
 		key := normalizedText(evidence)
@@ -255,7 +257,7 @@ func parseRecords(text, spine string) ([]Document, error) {
 			}
 		}
 		usedEvidence[key] = struct{}{}
-		result = append(result, Document{Source: "transcripts", SourceID: fmt.Sprintf("%s-%d", kind, len(result)), Title: title, Content: body, Kind: kind, Area: "work", Metadata: map[string]any{"evidence": strings.TrimSpace(evidence)}})
+		result = append(result, knowledge.Document{Source: "transcripts", SourceID: fmt.Sprintf("%s-%d", kind, len(result)), Title: title, Content: body, Kind: kind, Area: "work", Metadata: map[string]any{"evidence": strings.TrimSpace(evidence)}})
 	}
 	for _, r := range data.Problems[:min(len(data.Problems), 4)] {
 		if len(strings.TrimSpace(r.Problem)) < 12 || len(strings.TrimSpace(r.Solution)) < 12 || len(strings.TrimSpace(r.RootCause)) < 8 || !evidenceInSpine(spine, r.Evidence, false) {

@@ -41,13 +41,28 @@ SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 - Linux: `$XDG_DATA_HOME/ragfy/memory.sqlite`, or `~/.local/share/ragfy/memory.sqlite` if `XDG_DATA_HOME` is not set.
 - Windows: `%LOCALAPPDATA%\Ragfy\memory.sqlite`
 
-Set `RAGFY_HOME` to choose a different directory; the database will be created at `<RAGFY_HOME>/memory.sqlite`. The token and the `models/` and `logs/` directories are stored alongside it. Ragfy does not migrate the legacy `kb.sqlite`. When it detects embeddings from an earlier version in the Ragfy database, it rebuilds them from the stored documents before accepting queries. Persistence uses the Go `KnowledgeRepository` interface, so another backend such as Supabase can be added later.
+Set `RAGFY_HOME` to choose a different directory; the database will be created at `<RAGFY_HOME>/memory.sqlite`. The token and the `models/` and `logs/` directories are stored alongside it. Ragfy does not migrate the legacy `kb.sqlite`. When it detects embeddings from an earlier version in the Ragfy database, it rebuilds them from the stored documents before accepting queries. Persistence depends on the `knowledge.Repository` interface. SQLite is selected only in `cmd/ragfy/main.go`, so another adapter such as Supabase can replace it without changing the application service.
 
 ## Architecture and legacy files
 
 ```text
 UserPromptSubmit -> Go hook -> local service -> embeddings + hybrid search -> context
 SessionEnd       -> Go hook -> digestion queue -> local Qwen -> typed records -> SQLite
+```
+
+The Go source follows the standard command-plus-internal-packages layout:
+
+```text
+cmd/ragfy                 executable composition
+internal/api              hook transport contract
+internal/knowledge        persistence contract and domain types
+internal/storage/sqlite   SQLite adapter and schema
+internal/model            inference contract and llama.cpp adapter
+internal/digest           transcript parsing and knowledge extraction
+internal/service          application and HTTP service
+internal/hook             Codex and Claude hook integration
+internal/platform         operating-system integration
+internal/settings         process-level constants
 ```
 
 The previous Python project is preserved in [`antigo/`](antigo/). Its connectors and evaluation and ingestion scripts are not used by the Go hooks.

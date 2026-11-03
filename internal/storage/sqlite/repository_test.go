@@ -1,14 +1,16 @@
-package main
+package sqlite
 
 import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"ragfy/internal/knowledge"
 )
 
-func openTestRepository(t *testing.T) *SQLiteRepository {
+func openTestRepository(t *testing.T) *Repository {
 	t.Helper()
-	repo, err := OpenSQLite(filepath.Join(t.TempDir(), "memory.sqlite"))
+	repo, err := Open(Config{Path: filepath.Join(t.TempDir(), "memory.sqlite")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +21,7 @@ func openTestRepository(t *testing.T) *SQLiteRepository {
 func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	docs := []Document{
+	docs := []knowledge.Document{
 		{Source: "transcripts", SourceID: "service", Title: "Persistent service", Content: "The hook calls a resident Go daemon.", Kind: "decision", Area: "work", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1, 0}},
 		{Source: "documents", SourceID: "database", Title: "SQLite storage", Content: "Knowledge is stored locally.", Area: "documents", Metadata: map[string]any{"path": "/docs/storage.md"}, Vector: []float32{0, 1}},
 	}
@@ -70,7 +72,7 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	for _, doc := range []Document{
+	for _, doc := range []knowledge.Document{
 		{Source: "transcripts", SourceID: "s1-doc", Title: "one", Content: "session one knowledge", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
 		{Source: "transcripts", SourceID: "s10-doc", Title: "ten", Content: "session ten knowledge", Metadata: map[string]any{"session_id": "s10"}, Vector: []float32{1}},
 		{Source: "documents", SourceID: "manual", Title: "manual", Content: "unrelated document", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
@@ -113,7 +115,7 @@ func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 func TestSQLiteRepositoryUpsertReplacesExistingDocument(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	doc := Document{Source: "documents", SourceID: "same", Title: "old", Content: "old content", Vector: []float32{1}}
+	doc := knowledge.Document{Source: "documents", SourceID: "same", Title: "old", Content: "old content", Vector: []float32{1}}
 	if err := repo.Upsert(ctx, doc); err != nil {
 		t.Fatal(err)
 	}

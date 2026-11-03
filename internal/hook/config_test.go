@@ -1,4 +1,4 @@
-package main
+package hook
 
 import (
 	"encoding/json"
@@ -59,10 +59,10 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe := "/Applications/Ragfy Tools/ragfy"
-	if err := mergeHookFile(path, exe); err != nil {
+	if err := MergeConfig(path, exe); err != nil {
 		t.Fatal(err)
 	}
-	if err := mergeHookFile(path, exe); err != nil {
+	if err := MergeConfig(path, exe); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	created := filepath.Join(dir, "new", "hooks.json")
-	if err := mergeHookFile(created, "/usr/local/bin/ragfy"); err != nil {
+	if err := MergeConfig(created, "/usr/local/bin/ragfy"); err != nil {
 		t.Fatal(err)
 	}
 	root := readHookConfig(t, created)
@@ -116,7 +116,7 @@ func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 	if err := os.WriteFile(invalid, []byte(`{"hooks":`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := mergeHookFile(invalid, "/usr/local/bin/ragfy"); err == nil {
+	if err := MergeConfig(invalid, "/usr/local/bin/ragfy"); err == nil {
 		t.Fatal("invalid JSON hook config was accepted")
 	}
 }
