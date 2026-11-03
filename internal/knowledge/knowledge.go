@@ -21,7 +21,6 @@ type Hit struct {
 
 type Repository interface {
 	Upsert(context.Context, Document) error
-	Search(context.Context, string, []float32, int) ([]Hit, error)
 	EmbeddingModel(context.Context) (string, error)
 	SetEmbeddingModel(context.Context, string) error
 	Documents(context.Context) ([]Document, error)

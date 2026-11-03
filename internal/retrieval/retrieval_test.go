@@ -1,12 +1,21 @@
-package sqlite
+package retrieval
 
 import (
+	"context"
 	"math"
 	"strings"
 	"testing"
 
 	"ragfy/internal/knowledge"
 )
+
+type staticCorpus struct {
+	documents []knowledge.Document
+}
+
+func (corpus staticCorpus) SearchableDocuments(context.Context) ([]knowledge.Document, error) {
+	return corpus.documents, nil
+}
 
 func TestQueryTermsSupportsMultilingualTextAndDeduplicates(t *testing.T) {
 	terms := queryTerms("Como o serviço persistente evita recarregamento? Serviço multilíngue.")
@@ -42,8 +51,18 @@ func TestVectorAndRankingHelpers(t *testing.T) {
 	if hits[0].Score != 0.9 || hits[2].Score != 0.2 {
 		t.Fatalf("hits not sorted: %#v", hits)
 	}
-	vector := []float32{3.25}
-	if actual := decodeVector(encodeVector(vector)); len(actual) != 1 || actual[0] != 3.25 {
-		t.Fatalf("vector round trip = %#v", actual)
+}
+
+func TestHybridSearchCombinesSemanticAndLexicalScores(t *testing.T) {
+	retriever := NewHybrid(staticCorpus{documents: []knowledge.Document{
+		{SourceID: "semantic", Title: "Persistent daemon", Content: "Prompt hooks call one resident service.", Vector: []float32{1, 0}},
+		{SourceID: "unrelated", Title: "Database", Content: "SQLite storage", Vector: []float32{0, 1}},
+	}})
+	hits, err := retriever.Search(context.Background(), "resident daemon hook", []float32{1, 0}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Doc.SourceID != "semantic" {
+		t.Fatalf("unexpected hits: %#v", hits)
 	}
 }

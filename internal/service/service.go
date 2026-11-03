@@ -19,9 +19,12 @@ import (
 	"unicode/utf8"
 
 	"ragfy/internal/api"
+	"ragfy/internal/chunking"
 	"ragfy/internal/digest"
+	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
 	"ragfy/internal/model"
+	"ragfy/internal/retrieval"
 )
 
 const (
@@ -32,17 +35,35 @@ const (
 
 type Service struct {
 	repository knowledge.Repository
-	models     model.Engine
+	embedder   model.Embedder
+	extractor  extraction.Extractor
+	retriever  retrieval.Retriever
+	chunker    chunking.Chunker
 	queue      chan api.HookPayload
 	digestLock sync.Mutex
 }
 
-func New(repository knowledge.Repository, models model.Engine) *Service {
-	return NewWithQueueCapacity(repository, models, defaultQueueCapacity)
+type Dependencies struct {
+	Repository knowledge.Repository
+	Embedder   model.Embedder
+	Extractor  extraction.Extractor
+	Retriever  retrieval.Retriever
+	Chunker    chunking.Chunker
 }
 
-func NewWithQueueCapacity(repository knowledge.Repository, models model.Engine, queueCapacity int) *Service {
-	return &Service{repository: repository, models: models, queue: make(chan api.HookPayload, queueCapacity)}
+func New(dependencies Dependencies) *Service {
+	return NewWithQueueCapacity(dependencies, defaultQueueCapacity)
+}
+
+func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service {
+	return &Service{
+		repository: dependencies.Repository,
+		embedder:   dependencies.Embedder,
+		extractor:  dependencies.Extractor,
+		retriever:  dependencies.Retriever,
+		chunker:    dependencies.Chunker,
+		queue:      make(chan api.HookPayload, queueCapacity),
+	}
 }
 
 func (service *Service) Routes(token string) http.Handler {
@@ -85,14 +106,13 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 	query = truncate(query, 1600)
 	ctx, cancel := context.WithTimeout(request.Context(), 35*time.Second)
 	defer cancel()
-	queryInput := "Instruct: Given a coding assistant prompt, retrieve relevant passages from the user's knowledge base that help answer the prompt.\nQuery: " + query
-	vectors, err := service.models.Embed(ctx, []string{queryInput})
+	queryVector, err := service.embedder.EmbedQuery(ctx, query)
 	if err != nil {
 		log.Printf("recall embedding: %v", err)
 		writeJSON(writer, map[string]string{})
 		return
 	}
-	hits, err := service.repository.Search(ctx, query, vectors[0], 4)
+	hits, err := service.retriever.Search(ctx, query, queryVector, 4)
 	if err != nil {
 		log.Printf("recall search: %v", err)
 		writeJSON(writer, map[string]string{})
@@ -173,7 +193,7 @@ func (service *Service) IngestPath(ctx context.Context, root string) (int, error
 			return nil
 		}
 		title := strings.TrimSpace(strings.TrimSuffix(filepath.Base(path), extension))
-		for index, chunk := range splitChunks(body, 1200, 160) {
+		for index, chunk := range service.chunker.Split(body) {
 			documents = append(documents, knowledge.Document{Source: "documents", SourceID: fmt.Sprintf("%x-%d", sha256.Sum256([]byte(path)), index), Title: title, Content: chunk, Area: "documents", Metadata: map[string]any{"path": path, "parent": path}})
 		}
 		return nil
@@ -192,7 +212,7 @@ func (service *Service) storeDocuments(ctx context.Context, documents []knowledg
 		for index, document := range documents[start:end] {
 			texts[index] = document.Title + "\n" + document.Content
 		}
-		vectors, err := service.models.Embed(ctx, texts)
+		vectors, err := service.embedder.Embed(ctx, texts)
 		if err != nil {
 			return storedCount, err
 		}
@@ -226,8 +246,8 @@ func (service *Service) worker(ctx context.Context) {
 	}
 }
 
-func RefreshEmbeddings(ctx context.Context, repository knowledge.Repository, models model.Engine, embeddingVersion string) error {
-	if _, err := models.Embed(ctx, []string{"Ragfy local knowledge retrieval."}); err != nil {
+func RefreshEmbeddings(ctx context.Context, repository knowledge.Repository, embedder model.Embedder, embeddingVersion string) error {
+	if _, err := embedder.Embed(ctx, []string{"Ragfy local knowledge retrieval."}); err != nil {
 		return fmt.Errorf("validate multilingual embedding model: %w", err)
 	}
 	version, err := repository.EmbeddingModel(ctx)
@@ -253,7 +273,7 @@ func RefreshEmbeddings(ctx context.Context, repository knowledge.Repository, mod
 		for index, document := range documents[start:end] {
 			texts[index] = document.Title + "\n" + document.Content
 		}
-		vectors, err := models.Embed(ctx, texts)
+		vectors, err := embedder.Embed(ctx, texts)
 		if err != nil {
 			return fmt.Errorf("rebuild embeddings: %w", err)
 		}
@@ -301,7 +321,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	if project == "." {
 		project = "unknown"
 	}
-	documents, err := service.generateDocuments(ctx, sessionID, project, spine)
+	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Project: project, Spine: spine})
 	if err != nil {
 		return err
 	}
@@ -309,7 +329,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	for index, document := range documents {
 		texts[index] = document.Title + "\n" + document.Content
 	}
-	vectors, err := service.models.Embed(ctx, texts)
+	vectors, err := service.embedder.Embed(ctx, texts)
 	if err != nil {
 		return err
 	}
@@ -333,66 +353,6 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	}
 	_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
 	return err
-}
-
-func (service *Service) generateDocuments(ctx context.Context, sessionID, project, spine string) ([]knowledge.Document, error) {
-	response, err := service.models.Generate(ctx, digest.Prompt(project, spine))
-	if err != nil {
-		return nil, err
-	}
-	documents, err := digest.ParseRecords(response, spine)
-	if err == nil {
-		return documents, nil
-	}
-	log.Printf("digest %s: invalid structured response (%v); retrying once with strict JSON instructions", sessionID, err)
-	retryPrompt := "Return one valid JSON object only. It must start with { and end with }. Do not add analysis, explanations, or markdown.\n\n" + digest.Prompt(project, spine)
-	response, err = service.models.Generate(ctx, retryPrompt)
-	if err != nil {
-		return nil, err
-	}
-	documents, err = digest.ParseRecords(response, spine)
-	if err != nil {
-		return nil, fmt.Errorf("digest model response did not contain valid JSON after retry: %w", err)
-	}
-	return documents, nil
-}
-
-func splitChunks(text string, target, overlap int) []string {
-	if len(text) <= target {
-		return []string{text}
-	}
-	var chunks []string
-	start := 0
-	for start < len(text) {
-		end := start + target
-		if end >= len(text) {
-			chunks = append(chunks, strings.TrimSpace(text[start:]))
-			break
-		}
-		cut := strings.LastIndex(text[start:end], "\n\n")
-		if cut < target/2 {
-			cut = strings.LastIndex(text[start:end], ". ")
-		}
-		if cut < target/2 {
-			cut = target
-		}
-		end = start + cut
-		for end > start && end < len(text) && !utf8.RuneStart(text[end]) {
-			end--
-		}
-		chunks = append(chunks, strings.TrimSpace(text[start:end]))
-		start = end - overlap
-		if start < 0 {
-			start = 0
-		}
-		for start > 0 && start < len(text) && !utf8.RuneStart(text[start]) {
-			start++
-		}
-		for start < len(text) && (text[start] == ' ' || text[start] == '\n') {
-			start++
-		}
-	}
-	return chunks
 }
 
 func truncate(text string, maximumLength int) string {

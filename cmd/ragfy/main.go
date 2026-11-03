@@ -13,9 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"ragfy/internal/chunking"
+	"ragfy/internal/extraction"
 	"ragfy/internal/hook"
 	"ragfy/internal/model"
 	"ragfy/internal/platform"
+	"ragfy/internal/retrieval"
 	"ragfy/internal/service"
 	"ragfy/internal/settings"
 	"ragfy/internal/storage/sqlite"
@@ -110,7 +113,13 @@ func serve() error {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
-	applicationService := service.New(repository, models)
+	applicationService := service.New(service.Dependencies{
+		Repository: repository,
+		Embedder:   models,
+		Extractor:  extraction.NewGenerative(models),
+		Retriever:  retrieval.NewHybrid(repository),
+		Chunker:    chunking.NewText(1200, 160),
+	})
 	applicationService.StartWorker(ctx)
 	server := &http.Server{Addr: settings.ListenAddress, Handler: applicationService.Routes(token), ReadHeaderTimeout: 3 * time.Second}
 	go shutdownOnContext(ctx, server)

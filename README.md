@@ -55,14 +55,19 @@ The Go source follows the standard command-plus-internal-packages layout:
 ```text
 cmd/ragfy                 executable composition
 internal/api              hook transport contract
+internal/chunking         replaceable document splitting
+internal/extraction       replaceable knowledge extraction
 internal/knowledge        persistence contract and domain types
 internal/storage/sqlite   SQLite adapter and schema
-internal/model            inference contract and llama.cpp adapter
-internal/digest           transcript parsing and knowledge extraction
+internal/model            generation and embedding contracts, plus llama.cpp
+internal/digest           transcript parsing and extraction validation
+internal/retrieval        similarity, lexical matching and ranking
 internal/service          application and HTTP service
 internal/hook             Codex and Claude hook integration
 internal/platform         operating-system integration
 internal/settings         process-level constants
 ```
+
+Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition uses Qwen generation and embeddings, text chunking, hybrid semantic and lexical retrieval, and SQLite storage. Alternative algorithmic embedders or database-native retrievers can replace one capability without implementing the others.
 
 The previous Python project is preserved in [`antigo/`](antigo/). Its connectors and evaluation and ingestion scripts are not used by the Go hooks.

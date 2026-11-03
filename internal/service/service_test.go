@@ -13,10 +13,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"unicode/utf8"
 
 	"ragfy/internal/api"
+	"ragfy/internal/chunking"
+	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
+	"ragfy/internal/retrieval"
 	"ragfy/internal/storage/sqlite"
 )
 
@@ -45,6 +47,14 @@ func (f *fakeModelEngine) Embed(_ context.Context, texts []string) ([][]float32,
 	return vectors, nil
 }
 
+func (f *fakeModelEngine) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
+	vectors, err := f.Embed(ctx, []string{query})
+	if err != nil {
+		return nil, err
+	}
+	return vectors[0], nil
+}
+
 func (f *fakeModelEngine) Generate(_ context.Context, _ string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -69,6 +79,16 @@ func openTestRepository(t *testing.T) *sqlite.Repository {
 	}
 	t.Cleanup(func() { _ = repository.Close() })
 	return repository
+}
+
+func newTestService(repository knowledge.Repository, corpus retrieval.Corpus, models *fakeModelEngine, queueCapacity int) *Service {
+	return NewWithQueueCapacity(Dependencies{
+		Repository: repository,
+		Embedder:   models,
+		Extractor:  extraction.NewGenerative(models),
+		Retriever:  retrieval.NewHybrid(corpus),
+		Chunker:    chunking.NewText(1200, 160),
+	}, queueCapacity)
 }
 
 func requestJSON(t *testing.T, handler http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
@@ -98,7 +118,7 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 		t.Fatal(err)
 	}
 	models := &fakeModelEngine{}
-	service := NewWithQueueCapacity(repo, models, 1)
+	service := newTestService(repo, repo, models, 1)
 	handler := service.Routes("secret")
 
 	if got := requestJSON(t, handler, http.MethodGet, "/health", "wrong", nil); got.Code != http.StatusUnauthorized {
@@ -131,7 +151,7 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 }
 
 func TestDigestEndpointQueuesWithoutWaitingAndReportsFullQueue(t *testing.T) {
-	service := NewWithQueueCapacity(nil, nil, 1)
+	service := NewWithQueueCapacity(Dependencies{}, 1)
 	handler := service.Routes("secret")
 	payload := api.HookPayload{SessionID: "session", Transcript: "/tmp/transcript.jsonl"}
 	first := requestJSON(t, handler, http.MethodPost, "/digest", "secret", payload)
@@ -173,7 +193,7 @@ func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 		groundedFactJSON(firstEvidence, firstEvidence),
 		groundedFactJSON(secondEvidence, secondEvidence),
 	}}
-	service := NewWithQueueCapacity(repo, models, 1)
+	service := newTestService(repo, repo, models, 1)
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
 	filler := strings.Repeat("The implementation discussion contains durable technical context. ", 12)
 	writeCodexTranscript(t, transcript, firstEvidence, filler)
@@ -210,7 +230,7 @@ func TestDigestFailurePreservesPreviouslyStoredKnowledge(t *testing.T) {
 	repo := openTestRepository(t)
 	evidence := "Ragfy runs as a persistent local Go daemon for prompt hooks."
 	models := &fakeModelEngine{generated: []string{groundedFactJSON(evidence, evidence), `{`, `still not JSON`}}
-	service := NewWithQueueCapacity(repo, models, 1)
+	service := newTestService(repo, repo, models, 1)
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
 	writeCodexTranscript(t, transcript, evidence, strings.Repeat("Durable context. ", 40))
 	payload := api.HookPayload{SessionID: "session-1", Transcript: transcript, CWD: "/workspace/ragfy"}
@@ -236,7 +256,7 @@ func TestDigestRetriesOnceAfterTruncatedModelJSON(t *testing.T) {
 	repo := openTestRepository(t)
 	evidence := "Ragfy uses a local SQLite repository for durable knowledge."
 	models := &fakeModelEngine{generated: []string{`{"problems":[],"facts":[`, groundedFactJSON(evidence, evidence)}}
-	service := NewWithQueueCapacity(repo, models, 1)
+	service := newTestService(repo, repo, models, 1)
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
 	writeCodexTranscript(t, transcript, evidence, strings.Repeat("Technical discussion. ", 35))
 	if err := service.Digest(ctx, api.HookPayload{SessionID: "retry", Transcript: transcript, CWD: "/workspace/ragfy"}); err != nil {
@@ -257,7 +277,7 @@ func TestDigestShortTranscriptClearsOldSessionWithoutLoadingModel(t *testing.T) 
 		t.Fatal(err)
 	}
 	models := &fakeModelEngine{}
-	service := NewWithQueueCapacity(repo, models, 1)
+	service := newTestService(repo, repo, models, 1)
 	transcript := filepath.Join(t.TempDir(), "short.jsonl")
 	writeCodexTranscript(t, transcript, "Short session with no durable knowledge.")
 	data, err := os.ReadFile(transcript)
@@ -283,7 +303,8 @@ func TestDigestShortTranscriptClearsOldSessionWithoutLoadingModel(t *testing.T) 
 }
 
 func TestHTTPHandlersRejectInvalidPayloads(t *testing.T) {
-	service := NewWithQueueCapacity(openTestRepository(t), &fakeModelEngine{}, 1)
+	repository := openTestRepository(t)
+	service := newTestService(repository, repository, &fakeModelEngine{}, 1)
 	handler := service.Routes("secret")
 	for _, path := range []string{"/digest", "/ingest"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"broken"`))
@@ -300,7 +321,7 @@ func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
 	models := &fakeModelEngine{}
-	service := New(repo, models)
+	service := newTestService(repo, repo, models, defaultQueueCapacity)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(strings.Repeat("Ragfy documentation paragraph. ", 60)), 0600); err != nil {
 		t.Fatal(err)
@@ -351,22 +372,10 @@ func TestRefreshEmbeddingsRebuildsOnlyForChangedModel(t *testing.T) {
 }
 
 func TestRecallReturnsEmptyContextWhenEmbeddingFails(t *testing.T) {
-	service := NewWithQueueCapacity(openTestRepository(t), &fakeModelEngine{embedErr: errors.New("embedding unavailable")}, 1)
+	repository := openTestRepository(t)
+	service := newTestService(repository, repository, &fakeModelEngine{embedErr: errors.New("embedding unavailable")}, 1)
 	response := requestJSON(t, service.Routes("secret"), http.MethodPost, "/recall", "secret", api.HookPayload{Prompt: "A sufficiently long recall query"})
 	if response.Code != http.StatusOK || response.Body.String() != "{}\n" {
 		t.Fatalf("embedding failure response = %d %q", response.Code, response.Body.String())
-	}
-}
-
-func TestSplitChunksPreservesUTF8AndOverlap(t *testing.T) {
-	text := strings.Repeat("Conhecimento multilíngue persiste entre sessões. ", 20)
-	chunks := splitChunks(text, 180, 30)
-	if len(chunks) < 2 {
-		t.Fatalf("got %d chunks, want multiple", len(chunks))
-	}
-	for _, chunk := range chunks {
-		if !utf8.ValidString(chunk) || strings.TrimSpace(chunk) == "" {
-			t.Fatalf("invalid chunk %q", chunk)
-		}
 	}
 }

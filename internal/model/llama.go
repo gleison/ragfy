@@ -39,7 +39,8 @@ type Llama struct {
 	embedName string
 }
 
-var _ Engine = (*Llama)(nil)
+var _ Embedder = (*Llama)(nil)
+var _ Generator = (*Llama)(nil)
 
 func NewLlama(ctx context.Context, directory string) (*Llama, error) {
 	if err := os.MkdirAll(directory, 0700); err != nil {
@@ -128,6 +129,15 @@ func (engine *Llama) Embed(ctx context.Context, texts []string) ([][]float32, er
 		}
 	}
 	return vectors, nil
+}
+
+func (engine *Llama) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
+	queryInput := "Instruct: Given a coding assistant prompt, retrieve relevant passages from the user's knowledge base that help answer the prompt.\nQuery: " + query
+	vectors, err := engine.Embed(ctx, []string{queryInput})
+	if err != nil {
+		return nil, err
+	}
+	return vectors[0], nil
 }
 
 func (engine *Llama) Generate(ctx context.Context, prompt string) (string, error) {

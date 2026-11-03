@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"ragfy/internal/knowledge"
+	"ragfy/internal/retrieval"
 )
 
 func openTestRepository(t *testing.T) *Repository {
@@ -39,7 +40,8 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 		t.Fatalf("unexpected stored documents: %#v", stored)
 	}
 
-	hits, err := repo.Search(ctx, "resident daemon hook", []float32{1, 0}, 4)
+	retriever := retrieval.NewHybrid(repo)
+	hits, err := retriever.Search(ctx, "resident daemon hook", []float32{1, 0}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +62,7 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	if err := repo.UpdateEmbedding(ctx, "documents", "database", []float32{1, 0}); err != nil {
 		t.Fatal(err)
 	}
-	hits, err = repo.Search(ctx, "SQLite storage", []float32{1, 0}, 1)
+	hits, err = retriever.Search(ctx, "SQLite storage", []float32{1, 0}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
