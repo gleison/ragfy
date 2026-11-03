@@ -41,7 +41,7 @@ SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 - Linux: `$XDG_DATA_HOME/ragfy/memory.sqlite`, or `~/.local/share/ragfy/memory.sqlite` if `XDG_DATA_HOME` is not set.
 - Windows: `%LOCALAPPDATA%\Ragfy\memory.sqlite`
 
-Set `RAGFY_HOME` to choose a different directory; the database will be created at `<RAGFY_HOME>/memory.sqlite`. The token and the `models/` and `logs/` directories are stored alongside it. Ragfy does not migrate the legacy `kb.sqlite`. When it detects embeddings from an earlier version in the Ragfy database, it rebuilds them from the stored documents before accepting queries. Persistence uses the Go `Repository` interface, so another backend such as Supabase can be added later.
+Set `RAGFY_HOME` to choose a different directory; the database will be created at `<RAGFY_HOME>/memory.sqlite`. The token and the `models/` and `logs/` directories are stored alongside it. Ragfy does not migrate the legacy `kb.sqlite`. When it detects embeddings from an earlier version in the Ragfy database, it rebuilds them from the stored documents before accepting queries. Persistence uses the Go `KnowledgeRepository` interface, so another backend such as Supabase can be added later.
 
 ## Architecture and legacy files
 

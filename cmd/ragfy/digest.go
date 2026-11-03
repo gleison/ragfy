@@ -43,6 +43,12 @@ type decisionRecord struct {
 	Evidence string `json:"evidence"`
 }
 
+type transcriptMessage struct {
+	role    string
+	content any
+	source  string
+}
+
 func digestPrompt(project, spine string) string {
 	return fmt.Sprintf(`Extract high-value durable knowledge from this coding-assistant session transcript. Return only a JSON object with exactly four arrays: problems, facts, preferences, decisions. Use [] when none apply, extract at most 1 record per array, and never duplicate the same knowledge across categories. Do not include reasoning, markdown fences, or text outside the JSON object. Start with { and end with }.
 
@@ -71,46 +77,15 @@ func transcriptSpine(data []byte, capChars int) string {
 		if json.Unmarshal(scanner.Bytes(), &row) != nil {
 			continue
 		}
-		typ, _ := row["type"].(string)
-		message, _ := row["message"].(map[string]any)
-		payload, _ := row["payload"].(map[string]any)
-		role, content, source := "", any(nil), ""
-		switch typ {
-		case "user", "assistant":
-			role, content, source = typ, message["content"], "Claude"
-		case "response_item": // Codex rollout JSONL records
-			if payload["type"] == "message" {
-				role, _ = payload["role"].(string)
-				content, source = payload["content"], "Codex"
-			}
-		case "event_msg": // Some Codex rollout versions emit user/agent message events
-			eventType, _ := payload["type"].(string)
-			if eventType == "user_message" {
-				role, content, source = "user", payload["message"], "Codex"
-			} else if eventType == "agent_message" {
-				role, content, source = "assistant", payload["message"], "Codex"
-			}
-		}
-		if role != "user" && role != "assistant" {
+		message, ok := parseTranscriptMessage(row)
+		if !ok {
 			continue
 		}
-		if source == "" {
-			source = "assistant"
-		}
-		prefix := "CLAUDE"
-		if source == "Codex" {
-			prefix = "CODEX"
-		}
-		if role == "user" {
-			prefix = "USER"
-		}
-		if text := transcriptText(content); strings.TrimSpace(text) != "" {
-			// Exclude messages quoting the known invalid schema examples from the
-			// earlier extractor; those examples are not session knowledge.
-			if strings.Contains(text, "durable self-contained state") || strings.Contains(text, "standing instruction") || strings.Contains(text, "settled choice") {
+		if text := transcriptText(message.content); strings.TrimSpace(text) != "" {
+			if containsInvalidExtractorExample(text) {
 				continue
 			}
-			out = append(out, prefix+": "+strings.TrimSpace(text))
+			out = append(out, transcriptPrefix(message)+": "+strings.TrimSpace(text))
 		}
 	}
 	text := strings.Join(out, "\n\n")
@@ -128,7 +103,58 @@ func transcriptSpine(data []byte, capChars int) string {
 		start++
 	}
 	return text[:head] + "\n\n[Middle messages omitted. Later messages override earlier ones.]\n\n" + text[start:]
+}
 
+func parseTranscriptMessage(row map[string]any) (transcriptMessage, bool) {
+	recordType, _ := row["type"].(string)
+	message, _ := row["message"].(map[string]any)
+	payload, _ := row["payload"].(map[string]any)
+
+	var parsed transcriptMessage
+	switch recordType {
+	case "user", "assistant":
+		parsed = transcriptMessage{role: recordType, content: message["content"], source: "Claude"}
+	case "response_item":
+		if payload["type"] == "message" {
+			parsed.role, _ = payload["role"].(string)
+			parsed.content = payload["content"]
+			parsed.source = "Codex"
+		}
+	case "event_msg":
+		parsed = parseCodexEventMessage(payload)
+	}
+	return parsed, parsed.role == "user" || parsed.role == "assistant"
+}
+
+func parseCodexEventMessage(payload map[string]any) transcriptMessage {
+	eventType, _ := payload["type"].(string)
+	switch eventType {
+	case "user_message":
+		return transcriptMessage{role: "user", content: payload["message"], source: "Codex"}
+	case "agent_message":
+		return transcriptMessage{role: "assistant", content: payload["message"], source: "Codex"}
+	default:
+		return transcriptMessage{}
+	}
+}
+
+func transcriptPrefix(message transcriptMessage) string {
+	if message.role == "user" {
+		return "USER"
+	}
+	if message.source == "Codex" {
+		return "CODEX"
+	}
+	return "CLAUDE"
+}
+
+func containsInvalidExtractorExample(text string) bool {
+	for _, marker := range []string{"durable self-contained state", "standing instruction", "settled choice"} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func transcriptText(content any) string {

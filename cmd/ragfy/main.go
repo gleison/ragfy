@@ -44,6 +44,11 @@ const (
 	embedURL          = "hf://Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
 	embedSHA256       = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
 	embedModelVersion = embedSHA256 + ":query-instruction-v1"
+	chatContextSize   = 4096
+	chatBatchSize     = 2048
+	chatOutputTokens  = 1200
+	digestSpineChars  = 6500
+	minimumSpineChars = 500
 )
 
 type HookPayload struct {
@@ -73,9 +78,7 @@ type Hit struct {
 	Doc   Document
 }
 
-// Repository is the storage boundary. A hosted backend can be added without
-// changing hook, digest, or model code.
-type Repository interface {
+type KnowledgeRepository interface {
 	Upsert(context.Context, Document) error
 	Search(context.Context, string, []float32, int) ([]Hit, error)
 	EmbeddingModel(context.Context) (string, error)
@@ -347,9 +350,9 @@ func (e *LlamaEngine) Embed(ctx context.Context, texts []string) ([][]float32, e
 }
 
 func (e *LlamaEngine) Generate(ctx context.Context, prompt string) (string, error) {
-	// Use an explicit context size instead of the model's advertised maximum
-	// so inference memory stays bounded.
-	contextSize, batchSize, uBatchSize := uint32(4096), uint32(2048), uint32(2048)
+	contextSize := uint32(chatContextSize)
+	batchSize := uint32(chatBatchSize)
+	uBatchSize := uint32(chatBatchSize)
 	returnText := ""
 	err := e.llm.WithContext(ctx, schema.ContextRequest{
 		LoadModelRequest: schema.LoadModelRequest{Name: e.chatName},
@@ -360,9 +363,7 @@ func (e *LlamaEngine) Generate(ctx context.Context, prompt string) (string, erro
 		task.CachedModel().Lock()
 		defer task.CachedModel().Unlock()
 
-		// Qwen ChatML control tokens must be tokenized as special tokens.
-		// The binding's native completion path uses ParseSpecial=false.
-		promptText := "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+		promptText := qwenChatMLPrompt(prompt)
 		tokenOpts := llamasys.DefaultTokenizeOptions()
 		tokenOpts.AddSpecial = true
 		tokenOpts.ParseSpecial = true
@@ -370,8 +371,7 @@ func (e *LlamaEngine) Generate(ctx context.Context, prompt string) (string, erro
 		if err != nil {
 			return err
 		}
-		const maxOutput = 1200
-		if len(tokens)+maxOutput > int(contextSize) {
+		if len(tokens)+chatOutputTokens > int(contextSize) {
 			return fmt.Errorf("digest prompt exceeds context budget: %d tokens", len(tokens))
 		}
 		for _, bounds := range tokenChunks(len(tokens), int(batchSize)) {
@@ -394,7 +394,7 @@ func (e *LlamaEngine) Generate(ctx context.Context, prompt string) (string, erro
 		}
 		defer sampler.Close()
 		var output strings.Builder
-		for i := 0; i < maxOutput; i++ {
+		for i := 0; i < chatOutputTokens; i++ {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -426,6 +426,10 @@ func (e *LlamaEngine) Generate(ctx context.Context, prompt string) (string, erro
 	return returnText, err
 }
 
+func qwenChatMLPrompt(userPrompt string) string {
+	return "<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+}
+
 func tokenChunks(total, size int) [][2]int {
 	if total <= 0 || size <= 0 {
 		return nil
@@ -440,7 +444,7 @@ func tokenChunks(total, size int) [][2]int {
 func (e *LlamaEngine) Close() error { return e.llm.Close() }
 
 type Service struct {
-	repo   Repository
+	repo   KnowledgeRepository
 	models ModelEngine
 	queue  chan HookPayload
 	lock   sync.Mutex
@@ -618,10 +622,8 @@ func (s *Service) worker(ctx context.Context) {
 	}
 }
 
-func refreshEmbeddings(ctx context.Context, repo Repository, models ModelEngine) error {
-	// Validate the GGUF pooling metadata even for an empty database. Qwen3
-	// embeddings require last-token pooling; the binding uses the model's default.
-	if _, err := models.Embed(ctx, []string{"Ragfy local knowledge retrieval."}); err != nil {
+func refreshEmbeddings(ctx context.Context, repo KnowledgeRepository, models ModelEngine) error {
+	if err := validateEmbeddingModel(ctx, models); err != nil {
 		return fmt.Errorf("validate multilingual embedding model: %w", err)
 	}
 	version, err := repo.EmbeddingModel(ctx)
@@ -664,6 +666,11 @@ func refreshEmbeddings(ctx context.Context, repo Repository, models ModelEngine)
 	return repo.SetEmbeddingModel(ctx, embedModelVersion)
 }
 
+func validateEmbeddingModel(ctx context.Context, models ModelEngine) error {
+	_, err := models.Embed(ctx, []string{"Ragfy local knowledge retrieval."})
+	return err
+}
+
 func (s *Service) digest(ctx context.Context, p HookPayload) error {
 	if p.Transcript == "" {
 		return errors.New("transcript path missing")
@@ -686,11 +693,8 @@ func (s *Service) digest(ctx context.Context, p HookPayload) error {
 	if done {
 		return nil
 	}
-	// Keep enough room for the model's reply in the local model context. Long
-	// Codex rollouts can contain large tool payloads that add little durable
-	// knowledge and otherwise leave too little context for structured output.
-	spine := transcriptSpine(data, 6500)
-	if len(spine) < 500 {
+	spine := transcriptSpine(data, digestSpineChars)
+	if len(spine) < minimumSpineChars {
 		if err := s.repo.DeleteSessionDocs(ctx, key); err != nil {
 			return err
 		}
@@ -1179,33 +1183,7 @@ func mergeHookFile(path, exe string) error {
 		hooks = map[string]any{}
 		root["hooks"] = hooks
 	}
-	// Remove only this project's former Python recall command to prevent both
-	// implementations from injecting duplicate context.
-	if entries, ok := hooks["UserPromptSubmit"].([]any); ok {
-		kept := make([]any, 0, len(entries))
-		for _, raw := range entries {
-			entry, ok := raw.(map[string]any)
-			if !ok {
-				kept = append(kept, raw)
-				continue
-			}
-			children, _ := entry["hooks"].([]any)
-			filtered := make([]any, 0, len(children))
-			for _, child := range children {
-				hm, _ := child.(map[string]any)
-				command, _ := hm["command"].(string)
-				if strings.Contains(command, "recall.py") {
-					continue
-				}
-				filtered = append(filtered, child)
-			}
-			if len(filtered) > 0 {
-				entry["hooks"] = filtered
-				kept = append(kept, entry)
-			}
-		}
-		hooks["UserPromptSubmit"] = kept
-	}
+	removeLegacyPythonRecallHooks(hooks)
 	for event, action := range map[string]string{"UserPromptSubmit": "recall", "SessionEnd": "digest"} {
 		command := strconv.Quote(exe) + " hook " + action
 		timeout := 4
@@ -1237,6 +1215,35 @@ func mergeHookFile(path, exe string) error {
 		return e
 	}
 	return os.WriteFile(path, append(b, '\n'), 0600)
+}
+
+func removeLegacyPythonRecallHooks(hooks map[string]any) {
+	entries, ok := hooks["UserPromptSubmit"].([]any)
+	if !ok {
+		return
+	}
+	keptEntries := make([]any, 0, len(entries))
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			keptEntries = append(keptEntries, rawEntry)
+			continue
+		}
+		children, _ := entry["hooks"].([]any)
+		keptHooks := make([]any, 0, len(children))
+		for _, child := range children {
+			hook, _ := child.(map[string]any)
+			command, _ := hook["command"].(string)
+			if !strings.Contains(command, "recall.py") {
+				keptHooks = append(keptHooks, child)
+			}
+		}
+		if len(keptHooks) > 0 {
+			entry["hooks"] = keptHooks
+			keptEntries = append(keptEntries, entry)
+		}
+	}
+	hooks["UserPromptSubmit"] = keptEntries
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -10,11 +10,13 @@ if [[ ! -d "$BUILD_TMP/.git" ]]; then
 fi
 
 cd "$BUILD_TMP"
-# Build against the exact llama.cpp gitlink recorded by the binding. Its Makefile
-# otherwise updates the submodule to upstream main, which can break C API ABI.
-git submodule update --init --recursive
-make -o submodule -o go-tidy wrapper \
-  CMAKE_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF"
+build_pinned_llama_cpp_revision() {
+  git submodule update --init --recursive
+  make -o submodule -o go-tidy wrapper \
+    CMAKE_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF"
+}
+
+build_pinned_llama_cpp_revision
 
 mkdir -p "$ROOT/dist"
 PKG_CONFIG_PATH="$BUILD_TMP/build/install/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
