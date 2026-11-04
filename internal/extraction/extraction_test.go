@@ -55,7 +55,7 @@ func TestGenerativeConsolidatesOverlappingWindows(t *testing.T) {
 		t.Fatalf("test spine did not produce multiple windows: %#v", windows)
 	}
 	empty := `{"problems":[],"facts":[],"preferences":[],"decisions":[]}`
-	final := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir métodos atômicos e nomes significativos.","why":"","applies_to":"código","evidence":%q,"acceptance":"explicit","acceptance_evidence":""}],"decisions":[]}`, evidence)
+	final := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir métodos atômicos e nomes significativos.","why":"","applies_to":"código","evidence":%q,"acceptance":"explicit","acceptance_evidence":"","visibility":"global"}],"decisions":[]}`, evidence)
 	responses := make([]string, len(windows)+1)
 	for index := range windows {
 		responses[index] = empty
@@ -83,7 +83,7 @@ func TestGenerativeRetriesInvalidResponse(t *testing.T) {
 	defer log.SetOutput(previousOutput)
 
 	evidence := "Ragfy runs as a persistent local Go daemon."
-	validResponse := fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"scope":"runtime","status":"current","evidence":%q}],"preferences":[],"decisions":[]}`, evidence, evidence)
+	validResponse := fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"area":"runtime","status":"current","evidence":%q,"visibility":"project"}],"preferences":[],"decisions":[]}`, evidence, evidence)
 	generator := &responseGenerator{responses: []string{"{", validResponse}}
 	extractor := NewGenerative(generator)
 	documents, err := extractor.Extract(context.Background(), Request{SessionID: "session", Source: "codex", Project: "ragfy", Spine: "USER: " + evidence})
@@ -96,7 +96,7 @@ func TestGenerativeRetriesInvalidResponse(t *testing.T) {
 	for _, want := range []string{
 		"invalid structured response",
 		"extraction source=codex windows=1 candidates=1 accepted=1 rejected=0",
-		"candidates_by_kind=fact:1 accepted_by_kind=fact:1 rejection_reasons=none",
+		"candidates_by_kind=fact:1 accepted_by_kind=fact:1 accepted_by_scope=project:1 rejection_reasons=none",
 	} {
 		if !strings.Contains(logs.String(), want) {
 			t.Fatalf("log missing %q:\n%s", want, logs.String())

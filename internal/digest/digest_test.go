@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"ragfy/internal/knowledge"
 )
 
 func TestJSONSchemaIsValid(t *testing.T) {
@@ -20,7 +22,7 @@ func TestJSONSchemaIsValid(t *testing.T) {
 func TestParseRecordsRejectsInvalidExtraction(t *testing.T) {
 	spine := "USER: Ragfy runs as a persistent local Go daemon."
 	tests := map[string]string{
-		"schema placeholder": `{"problems":[],"facts":[{"fact":"durable self-contained state","scope":"area","status":"current","evidence":"Ragfy runs as a persistent local Go daemon."}],"preferences":[],"decisions":[]}`,
+		"schema placeholder": `{"problems":[],"facts":[{"fact":"durable self-contained state","area":"runtime","status":"current","evidence":"Ragfy runs as a persistent local Go daemon.","visibility":"project"}],"preferences":[],"decisions":[]}`,
 		"truncated JSON":     `{"problems":[],"facts":[{"fact":"Ragfy runs as a local Go daemon."}],`,
 		"missing arrays":     `{"facts":[]}`,
 	}
@@ -35,7 +37,7 @@ func TestParseRecordsRejectsInvalidExtraction(t *testing.T) {
 
 func TestParseRecordsAcceptsGroundedKnowledge(t *testing.T) {
 	spine := "USER: Ragfy runs as a persistent local Go daemon."
-	output := `{"problems":[],"facts":[{"fact":"Ragfy runs as a persistent local Go daemon.","scope":"ragfy runtime","status":"current","evidence":"Ragfy runs as a persistent local Go daemon."}],"preferences":[],"decisions":[]}`
+	output := `{"problems":[],"facts":[{"fact":"Ragfy runs as a persistent local Go daemon.","area":"ragfy runtime","status":"current","evidence":"Ragfy runs as a persistent local Go daemon.","visibility":"project"}],"preferences":[],"decisions":[]}`
 	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +47,9 @@ func TestParseRecordsAcceptsGroundedKnowledge(t *testing.T) {
 	}
 	if docs[0].Kind != "fact" || !strings.Contains(docs[0].Content, "persistent local Go daemon") {
 		t.Fatalf("unexpected document: %#v", docs[0])
+	}
+	if docs[0].Scope != knowledge.ScopeProject {
+		t.Fatalf("scope = %q", docs[0].Scope)
 	}
 	if docs[0].Metadata["evidence"] != "Ragfy runs as a persistent local Go daemon." {
 		t.Fatalf("evidence was not preserved: %#v", docs[0].Metadata)
@@ -60,22 +65,22 @@ func TestParseRecordsRejectsUngroundedAndTransientKnowledge(t *testing.T) {
 		{
 			name:   "fabricated evidence",
 			spine:  "USER: Ragfy uses SQLite.",
-			output: `{"problems":[],"facts":[{"fact":"Ragfy uses PostgreSQL.","scope":"storage","status":"current","evidence":"Ragfy uses PostgreSQL."}],"preferences":[],"decisions":[]}`,
+			output: `{"problems":[],"facts":[{"fact":"Ragfy uses PostgreSQL.","area":"storage","status":"current","evidence":"Ragfy uses PostgreSQL.","visibility":"project"}],"preferences":[],"decisions":[]}`,
 		},
 		{
 			name:   "transient fact",
 			spine:  "CODEX: The current hash differs from the stored hash.",
-			output: `{"problems":[],"facts":[{"fact":"The current hash differs from the stored hash.","scope":"current session","status":"current","evidence":"The current hash differs from the stored hash."}],"preferences":[],"decisions":[]}`,
+			output: `{"problems":[],"facts":[{"fact":"The current hash differs from the stored hash.","area":"current session","status":"current","evidence":"The current hash differs from the stored hash.","visibility":"project"}],"preferences":[],"decisions":[]}`,
 		},
 		{
 			name:   "assistant preference",
 			spine:  "CODEX: Prefer SQLite for the MVP.",
-			output: `{"problems":[],"facts":[],"preferences":[{"preference":"Prefer SQLite for the MVP.","why":"","applies_to":"storage","evidence":"Prefer SQLite for the MVP."}],"decisions":[]}`,
+			output: `{"problems":[],"facts":[],"preferences":[{"preference":"Prefer SQLite for the MVP.","why":"","applies_to":"storage","evidence":"Prefer SQLite for the MVP.","visibility":"project"}],"decisions":[]}`,
 		},
 		{
 			name:   "assistant decision",
 			spine:  "CODEX: Increase the hook timeout to avoid transient failures.",
-			output: `{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Increase the hook timeout to avoid transient failures.","rejected":"","why":"","evidence":"Increase the hook timeout to avoid transient failures."}]}`,
+			output: `{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Increase the hook timeout to avoid transient failures.","rejected":"","why":"","evidence":"Increase the hook timeout to avoid transient failures.","visibility":"project"}]}`,
 		},
 	}
 	for _, tt := range tests {
@@ -93,7 +98,7 @@ func TestParseRecordsRejectsUngroundedAndTransientKnowledge(t *testing.T) {
 
 func TestParseRecordsAuditExplainsAcceptedAndRejectedCandidates(t *testing.T) {
 	spine := "USER: Ragfy uses SQLite for durable local storage.\n\nCODEX: Prefer SQLite for every project."
-	output := `{"problems":[],"facts":[{"fact":"Ragfy uses SQLite for durable local storage.","scope":"storage","status":"current","evidence":"Ragfy uses SQLite for durable local storage."},{"fact":"The current hash differs from the stored hash.","scope":"session","status":"current","evidence":"The current hash differs from the stored hash."}],"preferences":[{"preference":"Prefer SQLite for every project.","why":"","applies_to":"storage","evidence":"Prefer SQLite for every project."}],"decisions":[]}`
+	output := `{"problems":[],"facts":[{"fact":"Ragfy uses SQLite for durable local storage.","area":"storage","status":"current","evidence":"Ragfy uses SQLite for durable local storage.","visibility":"project"},{"fact":"The current hash differs from the stored hash.","area":"session","status":"current","evidence":"The current hash differs from the stored hash.","visibility":"project"}],"preferences":[{"preference":"Prefer SQLite for every project.","why":"","applies_to":"storage","evidence":"Prefer SQLite for every project.","visibility":"global"}],"decisions":[]}`
 	docs, audit, err := ParseRecordsWithAudit(output, spine)
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +106,7 @@ func TestParseRecordsAuditExplainsAcceptedAndRejectedCandidates(t *testing.T) {
 	if len(docs) != 1 {
 		t.Fatalf("got %d documents, want 1", len(docs))
 	}
-	want := "candidates=3 accepted=1 rejected=2 candidates_by_kind=fact:2,preference:1 accepted_by_kind=fact:1 rejection_reasons=evidence_not_from_user:1,transient_fact:1"
+	want := "candidates=3 accepted=1 rejected=2 candidates_by_kind=fact:2,preference:1 accepted_by_kind=fact:1 accepted_by_scope=project:1 rejection_reasons=evidence_not_from_user:1,transient_fact:1"
 	if got := audit.Summary(); got != want {
 		t.Fatalf("audit summary = %q, want %q", got, want)
 	}
@@ -112,7 +117,7 @@ func TestParseRecordsAuditDistinguishesEmptyModelResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "candidates=0 accepted=0 rejected=0 candidates_by_kind=none accepted_by_kind=none rejection_reasons=none"
+	want := "candidates=0 accepted=0 rejected=0 candidates_by_kind=none accepted_by_kind=none accepted_by_scope=none rejection_reasons=none"
 	if got := audit.Summary(); got != want {
 		t.Fatalf("audit summary = %q, want %q", got, want)
 	}
@@ -122,7 +127,7 @@ func TestParseRecordsAcceptsImplicitlyAcceptedDecision(t *testing.T) {
 	claim := "Use codex exec in read-only mode for Codex session extraction."
 	acceptance := "That is our next task; implement the proposed extractor."
 	spine := "CODEX: " + claim + "\n\nUSER: " + acceptance
-	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"Local generation","why":"Use the session provider","evidence":%q,"acceptance":"implicit","acceptance_evidence":%q}]}`, claim, acceptance)
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"Local generation","why":"Use the session provider","evidence":%q,"acceptance":"implicit","acceptance_evidence":%q,"visibility":"project"}]}`, claim, acceptance)
 	docs, audit, err := ParseRecordsWithAudit(output, spine)
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +146,7 @@ func TestParseRecordsAcceptsImplicitlyAcceptedDecision(t *testing.T) {
 func TestParseRecordsRejectsImplicitDecisionWithoutLaterUserAction(t *testing.T) {
 	claim := "Use codex exec in read-only mode for Codex session extraction."
 	spine := "USER: Earlier context.\n\nCODEX: " + claim
-	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"","why":"","evidence":%q,"acceptance":"implicit","acceptance_evidence":"Earlier context."}]}`, claim)
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"","why":"","evidence":%q,"acceptance":"implicit","acceptance_evidence":"Earlier context.","visibility":"project"}]}`, claim)
 	docs, audit, err := ParseRecordsWithAudit(output, spine)
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +158,7 @@ func TestParseRecordsRejectsImplicitDecisionWithoutLaterUserAction(t *testing.T)
 
 func TestPreferenceEvidenceCanComeFromLaterUserParagraph(t *testing.T) {
 	spine := "USER: Some context.\n\nAlways keep the README in English.\n\nCODEX: Understood."
-	output := `{"problems":[],"facts":[],"preferences":[{"preference":"Keep project documentation in English.","why":"","applies_to":"README and context","evidence":"Keep the README in English."}],"decisions":[]}`
+	output := `{"problems":[],"facts":[],"preferences":[{"preference":"Keep project documentation in English.","why":"","applies_to":"README and context","evidence":"Keep the README in English.","visibility":"global"}],"decisions":[]}`
 	output = strings.Replace(output, "Keep the README in English.", "Always keep the README in English.", 1)
 	docs, err := ParseRecords(output, spine)
 	if err != nil {
@@ -166,7 +171,7 @@ func TestPreferenceEvidenceCanComeFromLaterUserParagraph(t *testing.T) {
 
 func TestParseRecordsAcceptsUserPreferenceAndRejectsDuplicateEvidence(t *testing.T) {
 	spine := "USER: The service reloads the model on every hook call.\n\nUSER: The extracted knowledge is not refined enough."
-	output := `{"problems":[{"problem":"The service reloads the model on every hook call.","context":"hooks","solution":"Keep one persistent local service running.","root_cause":"Each hook starts the model runtime again.","evidence":"The service reloads the model on every hook call."}],"facts":[],"preferences":[{"preference":"Use refined documentation conventions.","why":"","applies_to":"documentation","evidence":"The extracted knowledge is not refined enough."}],"decisions":[{"decision":"Keep one persistent local service running.","rejected":"Reload per hook","why":"Avoid repeated startup","evidence":"The service reloads the model on every hook call."}]}`
+	output := `{"problems":[{"problem":"The service reloads the model on every hook call.","context":"hooks","solution":"Keep one persistent local service running.","root_cause":"Each hook starts the model runtime again.","evidence":"The service reloads the model on every hook call.","visibility":"project"}],"facts":[],"preferences":[{"preference":"Use refined documentation conventions.","why":"","applies_to":"documentation","evidence":"The extracted knowledge is not refined enough.","visibility":"global"}],"decisions":[{"decision":"Keep one persistent local service running.","rejected":"Reload per hook","why":"Avoid repeated startup","evidence":"The service reloads the model on every hook call.","visibility":"project"}]}`
 	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
@@ -255,7 +260,7 @@ func TestTranscriptWindowsOverlapCompleteMessages(t *testing.T) {
 func TestExplicitPreferenceAcceptsNaturalPortugueseWording(t *testing.T) {
 	evidence := "O código em si deve ser sua própria documentação, com métodos atômicos e nomes significativos."
 	spine := "USER: " + evidence
-	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir código autodocumentado com métodos atômicos e nomes significativos.","why":"","applies_to":"código Go","evidence":%q,"acceptance":"explicit","acceptance_evidence":""}],"decisions":[]}`, evidence)
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir código autodocumentado com métodos atômicos e nomes significativos.","why":"","applies_to":"código Go","evidence":%q,"acceptance":"explicit","acceptance_evidence":"","visibility":"global"}],"decisions":[]}`, evidence)
 	documents, audit, err := ParseRecordsWithAudit(output, spine)
 	if err != nil {
 		t.Fatal(err)

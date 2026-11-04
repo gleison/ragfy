@@ -23,8 +23,8 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
 	docs := []knowledge.Document{
-		{Source: "transcripts", SourceID: "service", Title: "Persistent service", Content: "The hook calls a resident Go daemon.", Kind: "decision", Area: "work", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1, 0}},
-		{Source: "documents", SourceID: "database", Title: "SQLite storage", Content: "Knowledge is stored locally.", Area: "documents", Metadata: map[string]any{"path": "/docs/storage.md"}, Vector: []float32{0, 1}},
+		{Source: "transcripts", SourceID: "service", Title: "Persistent service", Content: "The hook calls a resident Go daemon.", Kind: "decision", Area: "work", Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1, 0}},
+		{Source: "documents", SourceID: "database", Title: "SQLite storage", Content: "Knowledge is stored locally.", Area: "documents", Scope: knowledge.ScopeGlobal, Metadata: map[string]any{"path": "/docs/storage.md"}, Vector: []float32{0, 1}},
 	}
 	for _, doc := range docs {
 		if err := repo.Upsert(ctx, doc); err != nil {
@@ -36,12 +36,12 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored) != 2 || stored[0].Metadata["session_id"] != "s1" {
+	if len(stored) != 2 || stored[0].Metadata["session_id"] != "s1" || stored[0].Scope != knowledge.ScopeProject || stored[0].Project != "ragfy" || stored[1].Scope != knowledge.ScopeGlobal {
 		t.Fatalf("unexpected stored documents: %#v", stored)
 	}
 
 	retriever := retrieval.NewHybrid(repo)
-	hits, err := retriever.Search(ctx, "resident daemon hook", []float32{1, 0}, 4)
+	hits, err := retriever.Search(ctx, retrieval.Query{Text: "resident daemon hook", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	if err := repo.UpdateEmbedding(ctx, "documents", "database", []float32{1, 0}); err != nil {
 		t.Fatal(err)
 	}
-	hits, err = retriever.Search(ctx, "SQLite storage", []float32{1, 0}, 1)
+	hits, err = retriever.Search(ctx, retrieval.Query{Text: "SQLite storage", Vector: []float32{1, 0}, Limit: 1, Project: "other"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,13 +71,26 @@ func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	}
 }
 
+func TestSQLiteRepositoryRejectsInvalidScope(t *testing.T) {
+	repo := openTestRepository(t)
+	for _, document := range []knowledge.Document{
+		{Source: "documents", SourceID: "missing", Content: "missing scope"},
+		{Source: "documents", SourceID: "global-project", Content: "global with project", Scope: knowledge.ScopeGlobal, Project: "ragfy"},
+		{Source: "documents", SourceID: "project-missing", Content: "project without name", Scope: knowledge.ScopeProject},
+	} {
+		if err := repo.Upsert(context.Background(), document); err == nil {
+			t.Fatalf("accepted invalid document: %#v", document)
+		}
+	}
+}
+
 func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
 	for _, doc := range []knowledge.Document{
-		{Source: "transcripts", SourceID: "s1-doc", Title: "one", Content: "session one knowledge", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
-		{Source: "transcripts", SourceID: "s10-doc", Title: "ten", Content: "session ten knowledge", Metadata: map[string]any{"session_id": "s10"}, Vector: []float32{1}},
-		{Source: "documents", SourceID: "manual", Title: "manual", Content: "unrelated document", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
+		{Source: "transcripts", SourceID: "s1-doc", Title: "one", Content: "session one knowledge", Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
+		{Source: "transcripts", SourceID: "s10-doc", Title: "ten", Content: "session ten knowledge", Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "s10"}, Vector: []float32{1}},
+		{Source: "documents", SourceID: "manual", Title: "manual", Content: "unrelated document", Scope: knowledge.ScopeGlobal, Metadata: map[string]any{"session_id": "s1"}, Vector: []float32{1}},
 	} {
 		if err := repo.Upsert(ctx, doc); err != nil {
 			t.Fatal(err)
@@ -117,7 +130,7 @@ func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 func TestSQLiteRepositoryUpsertReplacesExistingDocument(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	doc := knowledge.Document{Source: "documents", SourceID: "same", Title: "old", Content: "old content", Vector: []float32{1}}
+	doc := knowledge.Document{Source: "documents", SourceID: "same", Title: "old", Content: "old content", Scope: knowledge.ScopeGlobal, Vector: []float32{1}}
 	if err := repo.Upsert(ctx, doc); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -61,7 +62,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, model)
 }
 
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area FROM docs ORDER BY id`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project FROM docs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +71,7 @@ func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Docume
 	for rows.Next() {
 		var document knowledge.Document
 		var metadata string
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area); err != nil {
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
@@ -85,15 +86,18 @@ func (repository *Repository) UpdateEmbedding(ctx context.Context, source, sourc
 }
 
 func (repository *Repository) Upsert(ctx context.Context, document knowledge.Document) error {
+	if !document.HasValidScope() {
+		return fmt.Errorf("invalid knowledge scope %q for project %q", document.Scope, document.Project)
+	}
 	metadata, _ := json.Marshal(document.Metadata)
 	var vector []byte
 	if len(document.Vector) > 0 {
 		vector = encodeVector(document.Vector)
 	}
-	_, err := repository.database.ExecContext(ctx, `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,embedding)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
-content=excluded.content,metadata=excluded.metadata,kind=excluded.kind,area=excluded.area,embedding=excluded.embedding`,
-		document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, vector)
+	_, err := repository.database.ExecContext(ctx, `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding)
+VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
+content=excluded.content,metadata=excluded.metadata,kind=excluded.kind,area=excluded.area,scope=excluded.scope,project=excluded.project,embedding=excluded.embedding`,
+		document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector)
 	return err
 }
 
@@ -126,7 +130,7 @@ func (repository *Repository) DeleteSessionDocs(ctx context.Context, sessionID s
 }
 
 func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,embedding FROM docs WHERE embedding IS NOT NULL`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding FROM docs WHERE embedding IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +140,7 @@ func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowle
 		var document knowledge.Document
 		var metadata string
 		var encodedVector []byte
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &encodedVector); err != nil {
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)

@@ -21,17 +21,19 @@ type extracted struct {
 	Decisions   []decisionRecord `json:"decisions"`
 }
 type problemRecord struct {
-	Problem   string `json:"problem"`
-	Context   string `json:"context"`
-	Solution  string `json:"solution"`
-	RootCause string `json:"root_cause"`
-	Evidence  string `json:"evidence"`
+	Problem    string `json:"problem"`
+	Context    string `json:"context"`
+	Solution   string `json:"solution"`
+	RootCause  string `json:"root_cause"`
+	Evidence   string `json:"evidence"`
+	Visibility string `json:"visibility"`
 }
 type factRecord struct {
-	Fact     string `json:"fact"`
-	Scope    string `json:"scope"`
-	Status   string `json:"status"`
-	Evidence string `json:"evidence"`
+	Fact       string `json:"fact"`
+	Area       string `json:"area"`
+	Status     string `json:"status"`
+	Evidence   string `json:"evidence"`
+	Visibility string `json:"visibility"`
 }
 type prefRecord struct {
 	Preference         string `json:"preference"`
@@ -40,6 +42,7 @@ type prefRecord struct {
 	Evidence           string `json:"evidence"`
 	Acceptance         string `json:"acceptance"`
 	AcceptanceEvidence string `json:"acceptance_evidence"`
+	Visibility         string `json:"visibility"`
 }
 type decisionRecord struct {
 	Decision           string `json:"decision"`
@@ -48,9 +51,10 @@ type decisionRecord struct {
 	Evidence           string `json:"evidence"`
 	Acceptance         string `json:"acceptance"`
 	AcceptanceEvidence string `json:"acceptance_evidence"`
+	Visibility         string `json:"visibility"`
 }
 
-const JSONSchema = `{"type":"object","additionalProperties":false,"required":["problems","facts","preferences","decisions"],"properties":{"problems":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["problem","context","solution","root_cause","evidence"],"properties":{"problem":{"type":"string"},"context":{"type":"string"},"solution":{"type":"string"},"root_cause":{"type":"string"},"evidence":{"type":"string"}}}},"facts":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["fact","scope","status","evidence"],"properties":{"fact":{"type":"string"},"scope":{"type":"string"},"status":{"type":"string","enum":["current","planned"]},"evidence":{"type":"string"}}}},"preferences":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["preference","why","applies_to","evidence","acceptance","acceptance_evidence"],"properties":{"preference":{"type":"string"},"why":{"type":"string"},"applies_to":{"type":"string"},"evidence":{"type":"string"},"acceptance":{"type":"string","enum":["explicit","implicit"]},"acceptance_evidence":{"type":"string"}}}},"decisions":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["decision","rejected","why","evidence","acceptance","acceptance_evidence"],"properties":{"decision":{"type":"string"},"rejected":{"type":"string"},"why":{"type":"string"},"evidence":{"type":"string"},"acceptance":{"type":"string","enum":["explicit","implicit"]},"acceptance_evidence":{"type":"string"}}}}}}`
+const JSONSchema = `{"type":"object","additionalProperties":false,"required":["problems","facts","preferences","decisions"],"properties":{"problems":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["problem","context","solution","root_cause","evidence","visibility"],"properties":{"problem":{"type":"string"},"context":{"type":"string"},"solution":{"type":"string"},"root_cause":{"type":"string"},"evidence":{"type":"string"},"visibility":{"type":"string","enum":["global","project"]}}}},"facts":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["fact","area","status","evidence","visibility"],"properties":{"fact":{"type":"string"},"area":{"type":"string"},"status":{"type":"string","enum":["current","planned"]},"evidence":{"type":"string"},"visibility":{"type":"string","enum":["global","project"]}}}},"preferences":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["preference","why","applies_to","evidence","acceptance","acceptance_evidence","visibility"],"properties":{"preference":{"type":"string"},"why":{"type":"string"},"applies_to":{"type":"string"},"evidence":{"type":"string"},"acceptance":{"type":"string","enum":["explicit","implicit"]},"acceptance_evidence":{"type":"string"},"visibility":{"type":"string","enum":["global","project"]}}}},"decisions":{"type":"array","maxItems":4,"items":{"type":"object","additionalProperties":false,"required":["decision","rejected","why","evidence","acceptance","acceptance_evidence","visibility"],"properties":{"decision":{"type":"string"},"rejected":{"type":"string"},"why":{"type":"string"},"evidence":{"type":"string"},"acceptance":{"type":"string","enum":["explicit","implicit"]},"acceptance_evidence":{"type":"string"},"visibility":{"type":"string","enum":["global","project"]}}}}}}`
 
 type transcriptMessage struct {
 	role    string
@@ -62,15 +66,16 @@ type transcriptMessage struct {
 // It intentionally contains counts only so it can be written to service logs
 // without copying transcript or model-generated content.
 type Audit struct {
-	Candidates map[string]int
-	Accepted   map[string]int
-	Rejected   map[string]int
+	Candidates     map[string]int
+	Accepted       map[string]int
+	AcceptedScopes map[string]int
+	Rejected       map[string]int
 }
 
 func (audit Audit) Summary() string {
-	return fmt.Sprintf("candidates=%d accepted=%d rejected=%d candidates_by_kind=%s accepted_by_kind=%s rejection_reasons=%s",
+	return fmt.Sprintf("candidates=%d accepted=%d rejected=%d candidates_by_kind=%s accepted_by_kind=%s accepted_by_scope=%s rejection_reasons=%s",
 		sumCounts(audit.Candidates), sumCounts(audit.Accepted), sumCounts(audit.Rejected),
-		formatCounts(audit.Candidates), formatCounts(audit.Accepted), formatCounts(audit.Rejected))
+		formatCounts(audit.Candidates), formatCounts(audit.Accepted), formatCounts(audit.AcceptedScopes), formatCounts(audit.Rejected))
 }
 
 func sumCounts(counts map[string]int) int {
@@ -106,10 +111,11 @@ func Prompt(project, spine string) string {
 	return fmt.Sprintf(`Extract high-value durable knowledge from this coding-assistant session transcript. Work only from the transcript supplied below; do not call tools, inspect files, or seek outside context. Return only a JSON object with exactly four arrays: problems, facts, preferences, decisions. Use [] when none apply, extract at most 4 records per array, and never duplicate the same knowledge across categories. Do not include reasoning, markdown fences, or text outside the JSON object. Start with { and end with }.
 
 Every record must include evidence: an exact, contiguous transcript quote that directly supports the record's central claim. Prefer a longer quote when needed to support the complete claim. Write the record in the same language as its evidence.
-problems: string fields problem, context, solution, root_cause, evidence. Include only resolved, reusable technical problems whose cause and concrete fix are established. A symptom alone is not a problem record.
-facts: string fields fact, scope, status (current or planned), evidence. Include only concrete, stable technical state such as runtime architecture, exact model, storage location, configuration, or behavior. State it timelessly; avoid progress language such as already, now, completed, or implemented.
-preferences: string fields preference, why, applies_to, evidence, acceptance, acceptance_evidence. Include only a convention about communication, documentation, coding style, or working process that should guide future work. Product features, technical requirements, model choices, and architecture belong in decisions, not preferences.
-decisions: string fields decision, rejected, why, evidence, acceptance, acceptance_evidence. Include only a selected product requirement or settled architecture choice.
+Every record must include visibility, either "global" or "project". Use "global" for reusable knowledge that should guide work outside the current project, including general communication, coding, documentation, or engineering conventions. Use "project" for facts, problems, requirements, architecture, implementation state, and choices tied to the named project. The session's origin alone does not make knowledge project-specific: classify the knowledge itself. When uncertain, use "project".
+problems: string fields problem, context, solution, root_cause, evidence, visibility. Include only resolved, reusable technical problems whose cause and concrete fix are established. A symptom alone is not a problem record.
+facts: string fields fact, area, status (current or planned), evidence, visibility. Include only concrete, stable technical state such as runtime architecture, exact model, storage location, configuration, or behavior. State it timelessly; avoid progress language such as already, now, completed, or implemented.
+preferences: string fields preference, why, applies_to, evidence, acceptance, acceptance_evidence, visibility. Include only a convention about communication, documentation, coding style, or working process that should guide future work. Product features, technical requirements, model choices, and architecture belong in decisions, not preferences.
+decisions: string fields decision, rejected, why, evidence, acceptance, acceptance_evidence, visibility. Include only a selected product requirement or settled architecture choice.
 
 For preferences and decisions, acceptance must be "explicit" when evidence is an exact USER quote that directly states the knowledge; set acceptance_evidence to "". Use "implicit" only when evidence is an exact earlier assistant quote proposing or stating the knowledge and acceptance_evidence is an exact later USER quote whose instruction or action clearly relies on that knowledge. Silence, lack of objection, a new unrelated question, or a bare acknowledgement without enough context is not implicit acceptance. Never infer acceptance from the assistant's own messages.
 
@@ -204,9 +210,9 @@ func ConsolidationPrompt(project string, candidates []string) string {
 	for index, candidate := range candidates {
 		fmt.Fprintf(&batches, "\nCandidate batch %d:\n%s\n", index+1, candidate)
 	}
-	return fmt.Sprintf(`Consolidate candidate knowledge extracted from overlapping windows of one coding-assistant transcript. Return only one JSON object matching the same four-array schema: problems, facts, preferences, decisions, with at most 4 records per array.
+	return fmt.Sprintf(`Consolidate candidate knowledge extracted from overlapping windows of one coding-assistant transcript. Return only one JSON object matching the same four-array schema: problems, facts, preferences, decisions, with at most 4 records per array. Every record must retain its visibility as "global" or "project".
 
-Deduplicate equivalent records, merge only when the combined claim remains directly supported, discard superseded or conflicting earlier states, and keep the latest confirmed state. Preserve evidence and acceptance_evidence as exact, contiguous quotes copied unchanged from the candidate records. Never invent or paraphrase evidence. Retain explicit or implicit acceptance exactly as supported. Do not add knowledge absent from the candidates. Prefer fewer strong durable records to weak records. Do not include markdown or text outside the JSON object.
+Deduplicate equivalent records, merge only when the combined claim remains directly supported, discard superseded or conflicting earlier states, and keep the latest confirmed state. Preserve evidence and acceptance_evidence as exact, contiguous quotes copied unchanged from the candidate records. Never invent or paraphrase evidence. Preserve the narrowest supported visibility; do not broaden project knowledge to global. Retain explicit or implicit acceptance exactly as supported. Do not add knowledge absent from the candidates. Prefer fewer strong durable records to weak records. Do not include markdown or text outside the JSON object.
 
 Project: %s
 Candidate batches:%s
@@ -302,7 +308,7 @@ func ParseRecords(text, spine string) ([]knowledge.Document, error) {
 }
 
 func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, error) {
-	audit := Audit{Candidates: make(map[string]int), Accepted: make(map[string]int), Rejected: make(map[string]int)}
+	audit := Audit{Candidates: make(map[string]int), Accepted: make(map[string]int), AcceptedScopes: make(map[string]int), Rejected: make(map[string]int)}
 	var data extracted
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "~~~") {
@@ -370,7 +376,7 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 
 	var result []knowledge.Document
 	usedEvidence := make(map[string]struct{})
-	add := func(kind, title, body, evidence, acceptance, acceptanceEvidence string) bool {
+	add := func(kind, title, body, evidence, acceptance, acceptanceEvidence string, scope knowledge.Scope) bool {
 		key := normalizedText(evidence)
 		if _, exists := usedEvidence[key]; exists {
 			audit.Rejected["duplicate_evidence"]++
@@ -392,12 +398,17 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 		if strings.TrimSpace(acceptanceEvidence) != "" {
 			metadata["acceptance_evidence"] = strings.TrimSpace(acceptanceEvidence)
 		}
-		result = append(result, knowledge.Document{Source: "transcripts", SourceID: fmt.Sprintf("%s-%d", kind, len(result)), Title: title, Content: body, Kind: kind, Area: "work", Metadata: metadata})
+		result = append(result, knowledge.Document{Source: "transcripts", SourceID: fmt.Sprintf("%s-%d", kind, len(result)), Title: title, Content: body, Kind: kind, Area: "work", Scope: scope, Metadata: metadata})
 		audit.Accepted[kind]++
+		audit.AcceptedScopes[string(scope)]++
 		return true
 	}
 	for _, r := range data.Problems[:min(len(data.Problems), 4)] {
+		scope, validScope := knowledgeScope(r.Visibility)
 		switch {
+		case !validScope:
+			audit.Rejected["invalid_visibility"]++
+			continue
 		case len(strings.TrimSpace(r.Problem)) < 12:
 			audit.Rejected["problem_too_short"]++
 			continue
@@ -411,10 +422,14 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 			audit.Rejected["evidence_not_in_transcript"]++
 			continue
 		}
-		add("problem", truncate(strings.TrimSpace(r.Problem), 110), fmt.Sprintf("PROBLEM: %s\nWHERE: %s\nSOLUTION: %s\nROOT CAUSE: %s", r.Problem, r.Context, r.Solution, r.RootCause), r.Evidence, "", "")
+		add("problem", truncate(strings.TrimSpace(r.Problem), 110), fmt.Sprintf("PROBLEM: %s\nWHERE: %s\nSOLUTION: %s\nROOT CAUSE: %s", r.Problem, r.Context, r.Solution, r.RootCause), r.Evidence, "", "", scope)
 	}
 	for _, r := range data.Facts[:min(len(data.Facts), 4)] {
+		scope, validScope := knowledgeScope(r.Visibility)
 		switch {
+		case !validScope:
+			audit.Rejected["invalid_visibility"]++
+			continue
 		case len(strings.TrimSpace(r.Fact)) < 12:
 			audit.Rejected["fact_too_short"]++
 			continue
@@ -428,10 +443,14 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 		if r.Status != "planned" {
 			r.Status = "current"
 		}
-		add("fact", truncate(strings.TrimSpace(r.Fact), 110), fmt.Sprintf("%s\nAREA: %s\nSTATUS: %s", r.Fact, r.Scope, r.Status), r.Evidence, "", "")
+		add("fact", truncate(strings.TrimSpace(r.Fact), 110), fmt.Sprintf("%s\nAREA: %s\nSTATUS: %s", r.Fact, r.Area, r.Status), r.Evidence, "", "", scope)
 	}
 	for _, r := range data.Preferences[:min(len(data.Preferences), 4)] {
+		scope, validScope := knowledgeScope(r.Visibility)
 		switch {
+		case !validScope:
+			audit.Rejected["invalid_visibility"]++
+			continue
 		case len(strings.TrimSpace(r.Preference)) < 12:
 			audit.Rejected["preference_too_short"]++
 			continue
@@ -441,10 +460,14 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 			continue
 		}
 		acceptance := or(r.Acceptance, "explicit")
-		add("preference", truncate(strings.TrimSpace(r.Preference), 110), fmt.Sprintf("PREFERENCE: %s\nWHY: %s\nAPPLIES TO: %s\nACCEPTANCE: %s", r.Preference, or(r.Why, "not stated"), or(r.AppliesTo, "generally"), acceptance), r.Evidence, acceptance, r.AcceptanceEvidence)
+		add("preference", truncate(strings.TrimSpace(r.Preference), 110), fmt.Sprintf("PREFERENCE: %s\nWHY: %s\nAPPLIES TO: %s\nACCEPTANCE: %s", r.Preference, or(r.Why, "not stated"), or(r.AppliesTo, "generally"), acceptance), r.Evidence, acceptance, r.AcceptanceEvidence, scope)
 	}
 	for _, r := range data.Decisions[:min(len(data.Decisions), 4)] {
+		scope, validScope := knowledgeScope(r.Visibility)
 		switch {
+		case !validScope:
+			audit.Rejected["invalid_visibility"]++
+			continue
 		case len(strings.TrimSpace(r.Decision)) < 12:
 			audit.Rejected["decision_too_short"]++
 			continue
@@ -454,9 +477,14 @@ func ParseRecordsWithAudit(text, spine string) ([]knowledge.Document, Audit, err
 			continue
 		}
 		acceptance := or(r.Acceptance, "explicit")
-		add("decision", truncate(strings.TrimSpace(r.Decision), 110), fmt.Sprintf("DECISION: %s\nWHY: %s\nCHOSEN OVER: %s\nACCEPTANCE: %s", r.Decision, or(r.Why, "not stated"), or(r.Rejected, "no specific alternative"), acceptance), r.Evidence, acceptance, r.AcceptanceEvidence)
+		add("decision", truncate(strings.TrimSpace(r.Decision), 110), fmt.Sprintf("DECISION: %s\nWHY: %s\nCHOSEN OVER: %s\nACCEPTANCE: %s", r.Decision, or(r.Why, "not stated"), or(r.Rejected, "no specific alternative"), acceptance), r.Evidence, acceptance, r.AcceptanceEvidence, scope)
 	}
 	return result, audit, nil
+}
+
+func knowledgeScope(visibility string) (knowledge.Scope, bool) {
+	scope := knowledge.Scope(strings.TrimSpace(visibility))
+	return scope, scope.Valid()
 }
 
 func normalizedText(s string) string {

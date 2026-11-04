@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -72,10 +74,7 @@ func run(command string, arguments []string) error {
 		}
 		return setupHooks()
 	case "ingest":
-		if len(arguments) < 3 {
-			return errors.New("usage: ragfy ingest <folder>")
-		}
-		return platform.RequestIngest(arguments[2], settings.ListenAddress, os.Stdout)
+		return ingest(arguments[2:], os.Stdout)
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -83,6 +82,16 @@ func run(command string, arguments []string) error {
 		usage()
 		return fmt.Errorf("%w: %s", errUnknownCommand, command)
 	}
+}
+
+func ingest(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("ingest", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	project := flags.String("project", "", "limit ingested documents to a project")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 {
+		return errors.New("usage: ragfy ingest [--project <name>] <folder>")
+	}
+	return platform.RequestIngest(flags.Arg(0), *project, settings.ListenAddress, output)
 }
 
 func serve() error {
@@ -220,5 +229,5 @@ func setupHooks() error {
 }
 
 func usage() {
-	fmt.Println("ragfy {setup|serve|install|uninstall|status|setup-hooks|ingest <folder>|hook [recall|digest] [codex|claude]}")
+	fmt.Println("ragfy {setup|serve|install|uninstall|status|setup-hooks|ingest [--project <name>] <folder>|hook [recall|digest] [codex|claude]}")
 }

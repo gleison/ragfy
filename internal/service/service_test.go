@@ -113,7 +113,7 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 	repo := openTestRepository(t)
 	if err := repo.Upsert(ctx, knowledge.Document{
 		Source: "transcripts", SourceID: "persistent", Title: "Persistent daemon",
-		Content: "Prompt hooks call one resident Go service.", Vector: []float32{1, 0},
+		Content: "Prompt hooks call one resident Go service.", Scope: knowledge.ScopeGlobal, Vector: []float32{1, 0},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +150,29 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 	}
 }
 
+func TestRecallUsesGlobalAndCurrentProjectKnowledge(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	for _, document := range []knowledge.Document{
+		{Source: "transcripts", SourceID: "global", Title: "Global convention", Content: "Use meaningful names in every codebase.", Scope: knowledge.ScopeGlobal, Vector: []float32{1, 0}},
+		{Source: "transcripts", SourceID: "ragfy", Title: "Ragfy design", Content: "Ragfy uses a resident service.", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1, 0}},
+		{Source: "transcripts", SourceID: "other", Title: "Other design", Content: "Other uses a remote service.", Scope: knowledge.ScopeProject, Project: "other", Vector: []float32{1, 0}},
+	} {
+		if err := repo.Upsert(ctx, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := newTestService(repo, repo, &fakeModelEngine{}, 1)
+	response := requestJSON(t, service.Routes("secret"), http.MethodPost, "/recall", "secret", api.HookPayload{Prompt: "What service and naming conventions should I use?", CWD: "/workspace/ragfy"})
+	var body map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body["context"], "Global convention") || !strings.Contains(body["context"], "Ragfy design") || strings.Contains(body["context"], "Other design") {
+		t.Fatalf("unexpected scoped recall: %q", body["context"])
+	}
+}
+
 func TestDigestEndpointQueuesWithoutWaitingAndReportsFullQueue(t *testing.T) {
 	service := NewWithQueueCapacity(Dependencies{}, 1)
 	handler := service.Routes("secret")
@@ -181,7 +204,7 @@ func writeCodexTranscript(t *testing.T, path string, messages ...string) {
 }
 
 func groundedFactJSON(fact, evidence string) string {
-	return fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"scope":"runtime","status":"current","evidence":%q}],"preferences":[],"decisions":[]}`, fact, evidence)
+	return fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"area":"runtime","status":"current","evidence":%q,"visibility":"project"}],"preferences":[],"decisions":[]}`, fact, evidence)
 }
 
 func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
@@ -220,8 +243,28 @@ func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 	if len(docs) != 1 || !strings.Contains(docs[0].Content, "SQLite repository") {
 		t.Fatalf("session knowledge was not replaced: %#v", docs)
 	}
-	if docs[0].Metadata["session_id"] != "session-1" || docs[0].Metadata["project"] != "ragfy" || docs[0].Metadata["agent_source"] != "codex" || docs[0].Metadata["evidence"] != secondEvidence {
+	if docs[0].Scope != knowledge.ScopeProject || docs[0].Project != "ragfy" || docs[0].Metadata["session_id"] != "session-1" || docs[0].Metadata["origin_project"] != "ragfy" || docs[0].Metadata["agent_source"] != "codex" || docs[0].Metadata["evidence"] != secondEvidence {
 		t.Fatalf("missing digest metadata: %#v", docs[0].Metadata)
+	}
+}
+
+func TestDigestStoresGlobalKnowledgeWithoutProjectRestriction(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	evidence := "Sempre use métodos atômicos e nomes significativos em qualquer projeto."
+	response := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Usar métodos atômicos e nomes significativos.","why":"","applies_to":"qualquer projeto","evidence":%q,"acceptance":"explicit","acceptance_evidence":"","visibility":"global"}],"decisions":[]}`, evidence)
+	service := newTestService(repo, repo, &fakeModelEngine{generated: []string{response}}, 1)
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	writeCodexTranscript(t, transcript, evidence, strings.Repeat("Additional durable engineering context. ", 20))
+	if err := service.Digest(ctx, api.HookPayload{SessionID: "global", Source: "codex", Transcript: transcript, CWD: "/workspace/ragfy"}); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].Scope != knowledge.ScopeGlobal || documents[0].Project != "" || documents[0].Metadata["origin_project"] != "ragfy" {
+		t.Fatalf("documents=%#v", documents)
 	}
 }
 
@@ -272,7 +315,7 @@ func TestDigestShortTranscriptClearsOldSessionWithoutLoadingModel(t *testing.T) 
 	repo := openTestRepository(t)
 	if err := repo.Upsert(ctx, knowledge.Document{
 		Source: "transcripts", SourceID: "old", Title: "old", Content: "old session knowledge",
-		Metadata: map[string]any{"session_id": "short-session"}, Vector: []float32{1, 0},
+		Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "short-session"}, Vector: []float32{1, 0},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +372,7 @@ func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "ignored.go"), []byte("package ignored"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	count, err := service.IngestPath(ctx, root)
+	count, err := service.IngestPath(ctx, api.IngestPayload{Path: root})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,16 +387,36 @@ func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 		t.Fatalf("stored %d documents, count=%d", len(docs), count)
 	}
 	for _, doc := range docs {
-		if doc.Title != "README" || doc.Metadata["path"] != filepath.Join(root, "README.md") {
+		if doc.Title != "README" || doc.Scope != knowledge.ScopeGlobal || doc.Project != "" || doc.Metadata["path"] != filepath.Join(root, "README.md") {
 			t.Fatalf("unexpected ingested document: %#v", doc)
 		}
+	}
+}
+
+func TestIngestPathCanRestrictDocumentsToProject(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	service := newTestService(repo, repo, &fakeModelEngine{}, defaultQueueCapacity)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "architecture.md"), []byte("Project-specific architecture and implementation details."), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.IngestPath(ctx, api.IngestPayload{Path: root, Project: " ragfy "}); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].Scope != knowledge.ScopeProject || documents[0].Project != "ragfy" {
+		t.Fatalf("documents=%#v", documents)
 	}
 }
 
 func TestRefreshEmbeddingsRebuildsOnlyForChangedModel(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	if err := repo.Upsert(ctx, knowledge.Document{Source: "documents", SourceID: "one", Title: "One", Content: "content", Vector: []float32{0, 1}}); err != nil {
+	if err := repo.Upsert(ctx, knowledge.Document{Source: "documents", SourceID: "one", Title: "One", Content: "content", Scope: knowledge.ScopeGlobal, Vector: []float32{0, 1}}); err != nil {
 		t.Fatal(err)
 	}
 	models := &fakeModelEngine{}

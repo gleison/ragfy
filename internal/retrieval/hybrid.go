@@ -18,15 +18,18 @@ func NewHybrid(corpus Corpus) *Hybrid {
 	return &Hybrid{corpus: corpus}
 }
 
-func (retriever *Hybrid) Search(ctx context.Context, query string, queryVector []float32, limit int) ([]knowledge.Hit, error) {
+func (retriever *Hybrid) Search(ctx context.Context, query Query) ([]knowledge.Hit, error) {
 	documents, err := retriever.corpus.SearchableDocuments(ctx)
 	if err != nil {
 		return nil, err
 	}
-	terms := queryTerms(query)
+	terms := queryTerms(query.Text)
 	hits := make([]knowledge.Hit, 0)
 	for _, document := range documents {
-		semanticScore := cosine(queryVector, document.Vector)
+		if !visibleInProject(document, query.Project) {
+			continue
+		}
+		semanticScore := cosine(query.Vector, document.Vector)
 		lexicalMatch := lexicalScore(terms, document.Title+" "+document.Content)
 		if semanticScore < .35 || (semanticScore < .50 && lexicalMatch == 0) {
 			continue
@@ -34,10 +37,14 @@ func (retriever *Hybrid) Search(ctx context.Context, query string, queryVector [
 		hits = append(hits, knowledge.Hit{Score: semanticScore*.75 + lexicalMatch*.25, Doc: document})
 	}
 	sortHits(hits)
-	if len(hits) > limit {
-		hits = hits[:limit]
+	if len(hits) > query.Limit {
+		hits = hits[:query.Limit]
 	}
 	return hits, nil
+}
+
+func visibleInProject(document knowledge.Document, project string) bool {
+	return document.Scope == knowledge.ScopeGlobal || document.Scope == knowledge.ScopeProject && document.Project == project
 }
 
 func queryTerms(query string) []string {

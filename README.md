@@ -26,11 +26,12 @@ The script builds the native runtime for the current operating system and archit
 ragfy setup
 ragfy status
 ragfy ingest ~/Documents/Knowledge
+ragfy ingest --project ragfy ./docs
 ```
 
 `setup` registers a user-level service (LaunchAgent on macOS, systemd on Linux, or a logon task on Windows) and configures the `UserPromptSubmit` and `SessionEnd` hooks for Claude Code and Codex. The service listens only on `127.0.0.1` and protects its API with a local token.
 
-`ingest` indexes `.md`, `.rst`, and `.txt` files. `ragfy uninstall` removes the service startup registration. To remove the hooks, edit the `hooks` section in `~/.claude/settings.json` and `~/.codex/hooks.json`.
+`ingest` indexes `.md`, `.rst`, and `.txt` files as global knowledge by default. Pass `--project <name>` to restrict the indexed documents to that project. Document ingest chunks and embeds files locally; it does not run the session knowledge extractor. `ragfy uninstall` removes the service startup registration. To remove the hooks, edit the `hooks` section in `~/.claude/settings.json` and `~/.codex/hooks.json`.
 
 ## Models and local data
 
@@ -73,6 +74,6 @@ internal/platform         operating-system integration
 internal/settings         process-level constants
 ```
 
-Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, or database-native retrievers can replace one capability without implementing the others.
+Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Recall combines global knowledge with knowledge belonging to the current working-directory project and excludes other projects.
 
 The previous Python project is preserved in [`antigo/`](antigo/). Its connectors and evaluation and ingestion scripts are not used by the Go hooks.

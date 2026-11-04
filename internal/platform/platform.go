@@ -140,7 +140,7 @@ func StartupProgress(path string) (string, bool) {
 	return "", false
 }
 
-func RequestIngest(path, listenAddress string, output io.Writer) error {
+func RequestIngest(path, project, listenAddress string, output io.Writer) error {
 	dataDirectory, err := AppDataDir()
 	if err != nil {
 		return err
@@ -149,7 +149,7 @@ func RequestIngest(path, listenAddress string, output io.Writer) error {
 	if err != nil {
 		return errors.New("service is not installed; run ragfy setup")
 	}
-	body, _ := json.Marshal(map[string]string{"path": path})
+	body, _ := json.Marshal(map[string]string{"path": path, "project": project})
 	request, err := http.NewRequest(http.MethodPost, "http://"+listenAddress+"/ingest", strings.NewReader(string(body)))
 	if err != nil {
 		return err

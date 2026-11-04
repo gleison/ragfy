@@ -111,7 +111,7 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 		writeJSON(writer, map[string]string{})
 		return
 	}
-	hits, err := service.retriever.Search(ctx, query, queryVector, 4)
+	hits, err := service.retriever.Search(ctx, retrieval.Query{Text: query, Vector: queryVector, Limit: 4, Project: projectName(payload.CWD)})
 	if err != nil {
 		log.Printf("recall search: %v", err)
 		writeJSON(writer, map[string]string{})
@@ -142,16 +142,14 @@ func (service *Service) handleDigest(writer http.ResponseWriter, request *http.R
 }
 
 func (service *Service) handleIngest(writer http.ResponseWriter, request *http.Request) {
-	var payload struct {
-		Path string `json:"path"`
-	}
+	var payload api.IngestPayload
 	if json.NewDecoder(io.LimitReader(request.Body, 1<<20)).Decode(&payload) != nil || payload.Path == "" {
 		http.Error(writer, "path is required", http.StatusBadRequest)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Minute)
 	defer cancel()
-	documentCount, err := service.IngestPath(ctx, payload.Path)
+	documentCount, err := service.IngestPath(ctx, payload)
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -159,8 +157,9 @@ func (service *Service) handleIngest(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, map[string]int{"documents": documentCount})
 }
 
-func (service *Service) IngestPath(ctx context.Context, root string) (int, error) {
-	absoluteRoot, err := filepath.Abs(root)
+func (service *Service) IngestPath(ctx context.Context, request api.IngestPayload) (int, error) {
+	request.Project = strings.TrimSpace(request.Project)
+	absoluteRoot, err := filepath.Abs(request.Path)
 	if err != nil {
 		return 0, err
 	}
@@ -193,7 +192,12 @@ func (service *Service) IngestPath(ctx context.Context, root string) (int, error
 		}
 		title := strings.TrimSpace(strings.TrimSuffix(filepath.Base(path), extension))
 		for index, chunk := range service.chunker.Split(body) {
-			documents = append(documents, knowledge.Document{Source: "documents", SourceID: fmt.Sprintf("%x-%d", sha256.Sum256([]byte(path)), index), Title: title, Content: chunk, Area: "documents", Metadata: map[string]any{"path": path, "parent": path}})
+			document := knowledge.Document{Source: "documents", SourceID: fmt.Sprintf("%x-%d", sha256.Sum256([]byte(path)), index), Title: title, Content: chunk, Area: "documents", Scope: knowledge.ScopeGlobal, Metadata: map[string]any{"path": path, "parent": path}}
+			if request.Project != "" {
+				document.Scope = knowledge.ScopeProject
+				document.Project = request.Project
+			}
+			documents = append(documents, document)
 		}
 		return nil
 	})
@@ -321,10 +325,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
 		return err
 	}
-	project := filepath.Base(payload.CWD)
-	if project == "." {
-		project = "unknown"
-	}
+	project := projectName(payload.CWD)
 	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Source: payload.Source, Project: project, Spine: spine})
 	if err != nil {
 		return err
@@ -344,14 +345,19 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		document := &documents[index]
 		document.Vector = vectors[index]
 		document.TS = time.Now().UTC().Format(time.RFC3339)
-		document.SourceID = SHA256Hex([]byte(document.Kind + "\n" + document.Content))
 		if document.Metadata == nil {
 			document.Metadata = make(map[string]any)
 		}
-		document.Metadata["project"] = project
+		document.Metadata["origin_project"] = project
 		document.Metadata["agent_source"] = payload.Source
 		document.Metadata["session_id"] = sessionID
 		document.Metadata["transcript_hash"] = transcriptHash
+		if document.Scope == knowledge.ScopeProject {
+			document.Project = project
+		} else {
+			document.Project = ""
+		}
+		document.SourceID = SHA256Hex([]byte(string(document.Scope) + "\n" + document.Project + "\n" + document.Kind + "\n" + document.Content))
 		if err := service.repository.Upsert(ctx, *document); err != nil {
 			return err
 		}
@@ -359,6 +365,14 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	log.Printf("digest %s: stored=%d", sessionID, len(documents))
 	_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
 	return err
+}
+
+func projectName(workingDirectory string) string {
+	project := filepath.Base(filepath.Clean(workingDirectory))
+	if project == "." || project == string(filepath.Separator) || project == "" {
+		return "unknown"
+	}
+	return project
 }
 
 func truncate(text string, maximumLength int) string {

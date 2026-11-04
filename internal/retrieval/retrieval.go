@@ -7,5 +7,12 @@ import (
 )
 
 type Retriever interface {
-	Search(context.Context, string, []float32, int) ([]knowledge.Hit, error)
+	Search(context.Context, Query) ([]knowledge.Hit, error)
+}
+
+type Query struct {
+	Text    string
+	Vector  []float32
+	Limit   int
+	Project string
 }

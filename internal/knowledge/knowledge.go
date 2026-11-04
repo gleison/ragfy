@@ -2,6 +2,17 @@ package knowledge
 
 import "context"
 
+type Scope string
+
+const (
+	ScopeGlobal  Scope = "global"
+	ScopeProject Scope = "project"
+)
+
+func (scope Scope) Valid() bool {
+	return scope == ScopeGlobal || scope == ScopeProject
+}
+
 type Document struct {
 	Source   string         `json:"source"`
 	SourceID string         `json:"source_id"`
@@ -11,7 +22,13 @@ type Document struct {
 	Metadata map[string]any `json:"metadata"`
 	Kind     string         `json:"kind"`
 	Area     string         `json:"area"`
+	Scope    Scope          `json:"scope"`
+	Project  string         `json:"project,omitempty"`
 	Vector   []float32      `json:"-"`
+}
+
+func (document Document) HasValidScope() bool {
+	return document.Scope == ScopeGlobal && document.Project == "" || document.Scope == ScopeProject && document.Project != ""
 }
 
 type Hit struct {

@@ -55,14 +55,34 @@ func TestVectorAndRankingHelpers(t *testing.T) {
 
 func TestHybridSearchCombinesSemanticAndLexicalScores(t *testing.T) {
 	retriever := NewHybrid(staticCorpus{documents: []knowledge.Document{
-		{SourceID: "semantic", Title: "Persistent daemon", Content: "Prompt hooks call one resident service.", Vector: []float32{1, 0}},
-		{SourceID: "unrelated", Title: "Database", Content: "SQLite storage", Vector: []float32{0, 1}},
+		{SourceID: "semantic", Title: "Persistent daemon", Content: "Prompt hooks call one resident service.", Scope: knowledge.ScopeGlobal, Vector: []float32{1, 0}},
+		{SourceID: "unrelated", Title: "Database", Content: "SQLite storage", Scope: knowledge.ScopeGlobal, Vector: []float32{0, 1}},
 	}})
-	hits, err := retriever.Search(context.Background(), "resident daemon hook", []float32{1, 0}, 4)
+	hits, err := retriever.Search(context.Background(), Query{Text: "resident daemon hook", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(hits) != 1 || hits[0].Doc.SourceID != "semantic" {
 		t.Fatalf("unexpected hits: %#v", hits)
+	}
+}
+
+func TestHybridSearchIncludesGlobalAndCurrentProjectOnly(t *testing.T) {
+	retriever := NewHybrid(staticCorpus{documents: []knowledge.Document{
+		{SourceID: "global", Title: "Atomic methods", Content: "Use small atomic methods.", Scope: knowledge.ScopeGlobal, Vector: []float32{1, 0}},
+		{SourceID: "ragfy", Title: "Ragfy architecture", Content: "Use a persistent service.", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1, 0}},
+		{SourceID: "other", Title: "Other architecture", Content: "Use a remote service.", Scope: knowledge.ScopeProject, Project: "other", Vector: []float32{1, 0}},
+	}})
+	hits, err := retriever.Search(context.Background(), Query{Text: "service methods architecture", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("hits=%#v", hits)
+	}
+	for _, hit := range hits {
+		if hit.Doc.SourceID == "other" {
+			t.Fatalf("other project leaked into results: %#v", hits)
+		}
 	}
 }

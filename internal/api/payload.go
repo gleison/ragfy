@@ -10,3 +10,8 @@ type HookPayload struct {
 	EventCodex    string `json:"event"`
 	LastAssistant string `json:"last_assistant_message"`
 }
+
+type IngestPayload struct {
+	Path    string `json:"path"`
+	Project string `json:"project,omitempty"`
+}
