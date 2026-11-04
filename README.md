@@ -76,4 +76,6 @@ internal/settings         process-level constants
 
 Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Recall combines global knowledge with knowledge belonging to the current working-directory project and excludes other projects.
 
+The default retriever combines semantic similarity with field-aware BM25, gives titles more lexical weight, applies a small current-project boost, drops candidates that fall materially below the best result, and uses MMR to avoid redundant context. It may return fewer than four records when the remaining candidates are weak.
+
 The previous Python project is preserved in [`antigo/`](antigo/). Its connectors and evaluation and ingestion scripts are not used by the Go hooks.

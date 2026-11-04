@@ -32,8 +32,11 @@ func (document Document) HasValidScope() bool {
 }
 
 type Hit struct {
-	Score float64
-	Doc   Document
+	Score         float64
+	SemanticScore float64
+	LexicalScore  float64
+	ProjectBoost  float64
+	Doc           Document
 }
 
 type Repository interface {
