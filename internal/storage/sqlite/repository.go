@@ -39,6 +39,10 @@ func Open(config Config) (*Repository, error) {
 		database.Close()
 		return nil, err
 	}
+	if err = migrateSchema(database); err != nil {
+		database.Close()
+		return nil, err
+	}
 	return &Repository{database: database}, nil
 }
 
@@ -62,7 +66,7 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, model)
 }
 
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project FROM docs ORDER BY id`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason FROM docs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +75,12 @@ func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Docume
 	for rows.Next() {
 		var document knowledge.Document
 		var metadata string
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project); err != nil {
+		var encodedVector []byte
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
+		document.Vector = decodeVector(encodedVector)
 		documents = append(documents, document)
 	}
 	return documents, rows.Err()
@@ -94,12 +100,19 @@ func (repository *Repository) Upsert(ctx context.Context, document knowledge.Doc
 	if len(document.Vector) > 0 {
 		vector = encodeVector(document.Vector)
 	}
-	_, err := repository.database.ExecContext(ctx, `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding)
-VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
-content=excluded.content,metadata=excluded.metadata,kind=excluded.kind,area=excluded.area,scope=excluded.scope,project=excluded.project,embedding=excluded.embedding`,
-		document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector)
+	if document.Status == "" {
+		document.Status = knowledge.StatusActive
+	}
+	_, err := repository.database.ExecContext(ctx, upsertDocumentSQL,
+		document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector,
+		document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason)
 	return err
 }
+
+const upsertDocumentSQL = `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
+content=excluded.content,metadata=excluded.metadata,kind=excluded.kind,area=excluded.area,scope=excluded.scope,project=excluded.project,embedding=excluded.embedding,
+status=excluded.status,superseded_by=excluded.superseded_by,superseded_at=excluded.superseded_at,consolidation_reason=excluded.consolidation_reason`
 
 func (repository *Repository) MarkSession(ctx context.Context, sessionID, transcriptHash string) (bool, error) {
 	if sessionID == "" {
@@ -124,13 +137,86 @@ func (repository *Repository) HasSession(ctx context.Context, sessionID, transcr
 }
 
 func (repository *Repository) DeleteSessionDocs(ctx context.Context, sessionID string) error {
-	pattern := "%" + `"session_id":"` + sessionID + `"` + "%"
-	_, err := repository.database.ExecContext(ctx, `DELETE FROM docs WHERE source='transcripts' AND metadata LIKE ?`, pattern)
+	_, err := repository.database.ExecContext(ctx, `DELETE FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, sessionID)
 	return err
 }
 
+func (repository *Repository) CommitSession(ctx context.Context, commit knowledge.SessionCommit) error {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+
+	rows, err := transaction.QueryContext(ctx, `SELECT source_id FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, commit.SessionID)
+	if err != nil {
+		return err
+	}
+	var replacedIDs []string
+	for rows.Next() {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
+			rows.Close()
+			return err
+		}
+		replacedIDs = append(replacedIDs, sourceID)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, sourceID := range replacedIDs {
+		if _, err := transaction.ExecContext(ctx, `UPDATE docs SET status='active',superseded_by='',superseded_at='',consolidation_reason='' WHERE source='transcripts' AND superseded_by=?`, sourceID); err != nil {
+			return err
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, commit.SessionID); err != nil {
+		return err
+	}
+	for _, document := range commit.Documents {
+		if !document.HasValidScope() {
+			return fmt.Errorf("invalid knowledge scope %q for project %q", document.Scope, document.Project)
+		}
+		metadata, _ := json.Marshal(document.Metadata)
+		vector := encodeVector(document.Vector)
+		if document.Status == "" {
+			document.Status = knowledge.StatusActive
+		}
+		if _, err := transaction.ExecContext(ctx, upsertDocumentSQL,
+			document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector,
+			document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason); err != nil {
+			return err
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, supersession := range commit.Supersessions {
+		if supersession.LoserSourceID == supersession.WinnerSourceID {
+			return fmt.Errorf("knowledge record %q cannot supersede itself", supersession.LoserSourceID)
+		}
+		var winnerCount int
+		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs WHERE source='transcripts' AND source_id=?`, supersession.WinnerSourceID).Scan(&winnerCount); err != nil {
+			return err
+		}
+		if winnerCount != 1 {
+			return fmt.Errorf("supersession winner %q not found", supersession.WinnerSourceID)
+		}
+		result, err := transaction.ExecContext(ctx, `UPDATE docs SET status='superseded',superseded_by=?,superseded_at=?,consolidation_reason=? WHERE source='transcripts' AND source_id=?`,
+			supersession.WinnerSourceID, now, supersession.Reason, supersession.LoserSourceID)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("supersession loser %q not found", supersession.LoserSourceID)
+		}
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO digested_sessions(session_id,transcript_hash,created_at) VALUES(?,?,?)
+ON CONFLICT(session_id) DO UPDATE SET transcript_hash=excluded.transcript_hash,created_at=excluded.created_at`, commit.SessionID, commit.TranscriptHash, now); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
 func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding FROM docs WHERE embedding IS NOT NULL`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason FROM docs WHERE embedding IS NOT NULL AND status='active'`)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +226,7 @@ func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowle
 		var document knowledge.Document
 		var metadata string
 		var encodedVector []byte
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector); err != nil {
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
@@ -154,6 +240,44 @@ func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowle
 		return nil, err
 	}
 	return documents, nil
+}
+
+func migrateSchema(database *sql.DB) error {
+	columns := map[string]string{
+		"status":               "TEXT NOT NULL DEFAULT 'active'",
+		"superseded_by":        "TEXT NOT NULL DEFAULT ''",
+		"superseded_at":        "TEXT NOT NULL DEFAULT ''",
+		"consolidation_reason": "TEXT NOT NULL DEFAULT ''",
+	}
+	rows, err := database.Query(`PRAGMA table_info(docs)`)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for name, definition := range columns {
+		if present[name] {
+			continue
+		}
+		if _, err := database.Exec(`ALTER TABLE docs ADD COLUMN ` + name + ` ` + definition); err != nil {
+			return err
+		}
+	}
+	_, err = database.Exec(`CREATE INDEX IF NOT EXISTS docs_status_scope_project ON docs(status,scope,project)`)
+	return err
 }
 
 func encodeVector(vector []float32) []byte {

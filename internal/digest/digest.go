@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -149,6 +150,55 @@ func TranscriptSpine(data []byte) string {
 		}
 	}
 	return strings.Join(out, "\n\n")
+}
+
+func TranscriptTimestamp(data []byte, fallback time.Time) time.Time {
+	newest := time.Time{}
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		var row map[string]any
+		if json.Unmarshal(scanner.Bytes(), &row) != nil {
+			continue
+		}
+		for _, container := range []map[string]any{row, mapValue(row["message"]), mapValue(row["payload"])} {
+			for _, key := range []string{"timestamp", "created_at", "time"} {
+				if parsed, ok := parseTimestamp(container[key]); ok && parsed.After(newest) {
+					newest = parsed
+				}
+			}
+		}
+	}
+	if newest.IsZero() {
+		newest = fallback
+	}
+	return newest.UTC()
+}
+
+func mapValue(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
+}
+
+func parseTimestamp(value any) (time.Time, bool) {
+	switch typed := value.(type) {
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if parsed, err := time.Parse(layout, typed); err == nil {
+				return parsed, true
+			}
+		}
+	case float64:
+		seconds := int64(typed)
+		nanoseconds := int64((typed - float64(seconds)) * float64(time.Second))
+		if seconds > 1_000_000_000_000 {
+			seconds, nanoseconds = seconds/1000, seconds%1000*int64(time.Millisecond)
+		}
+		if seconds > 0 {
+			return time.Unix(seconds, nanoseconds), true
+		}
+	}
+	return time.Time{}, false
 }
 
 // TranscriptWindows keeps message boundaries intact and repeats complete messages

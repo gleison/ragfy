@@ -13,11 +13,14 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"ragfy/internal/api"
 	"ragfy/internal/chunking"
+	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
+	"ragfy/internal/reconciliation"
 	"ragfy/internal/retrieval"
 	"ragfy/internal/storage/sqlite"
 )
@@ -31,6 +34,23 @@ type fakeModelEngine struct {
 	embedCalls    int
 	generateErr   error
 	embedErr      error
+}
+
+type fakeReconciler struct {
+	requests []reconciliation.Request
+	relation reconciliation.Relation
+	err      error
+}
+
+func (f *fakeReconciler) Reconcile(_ context.Context, request reconciliation.Request) ([]reconciliation.Action, error) {
+	f.requests = append(f.requests, request)
+	if f.err != nil || len(request.New) == 0 || len(request.Existing) == 0 {
+		return nil, f.err
+	}
+	if f.relation == "" {
+		return nil, nil
+	}
+	return []reconciliation.Action{{NewSourceID: request.New[0].SourceID, ExistingSourceID: request.Existing[0].SourceID, Relation: f.relation}}, nil
 }
 
 func (f *fakeModelEngine) Embed(_ context.Context, texts []string) ([][]float32, error) {
@@ -188,10 +208,17 @@ func TestDigestEndpointQueuesWithoutWaitingAndReportsFullQueue(t *testing.T) {
 }
 
 func writeCodexTranscript(t *testing.T, path string, messages ...string) {
+	writeCodexTranscriptAt(t, path, "", messages...)
+}
+
+func writeCodexTranscriptAt(t *testing.T, path, timestamp string, messages ...string) {
 	t.Helper()
 	var lines []string
 	for _, message := range messages {
 		row := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "user_message", "message": message}}
+		if timestamp != "" {
+			row["timestamp"] = timestamp
+		}
 		encoded, err := json.Marshal(row)
 		if err != nil {
 			t.Fatal(err)
@@ -199,6 +226,14 @@ func writeCodexTranscript(t *testing.T, path string, messages ...string) {
 		lines = append(lines, string(encoded))
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func digestFactAt(t *testing.T, service *Service, path, sessionID, project, timestamp, evidence string) {
+	t.Helper()
+	writeCodexTranscriptAt(t, path, timestamp, evidence, strings.Repeat("Durable implementation context. ", 25))
+	if err := service.Digest(context.Background(), api.HookPayload{SessionID: sessionID, Source: "codex", Transcript: path, CWD: "/workspace/" + project}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -265,6 +300,183 @@ func TestDigestStoresGlobalKnowledgeWithoutProjectRestriction(t *testing.T) {
 	}
 	if len(documents) != 1 || documents[0].Scope != knowledge.ScopeGlobal || documents[0].Project != "" || documents[0].Metadata["origin_project"] != "ragfy" {
 		t.Fatalf("documents=%#v", documents)
+	}
+}
+
+func TestDigestSupersedesOlderKnowledgeAcrossSessions(t *testing.T) {
+	repo := openTestRepository(t)
+	oldFact := "Ragfy stores durable knowledge in an embedded file database."
+	newFact := "Ragfy stores durable knowledge in the PostgreSQL service."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(oldFact, oldFact), groundedFactJSON(newFact, newFact)}}
+	reconciler := &fakeReconciler{relation: reconciliation.RelationSupersedes}
+	service := newTestService(repo, repo, models, 1)
+	service.reconciler = reconciler
+	directory := t.TempDir()
+	digestFactAt(t, service, filepath.Join(directory, "old.jsonl"), "old", "ragfy", "2026-01-02T12:00:00Z", oldFact)
+	digestFactAt(t, service, filepath.Join(directory, "new.jsonl"), "new", "ragfy", "2026-02-02T12:00:00Z", newFact)
+
+	documents, err := repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 2 {
+		t.Fatalf("documents=%#v", documents)
+	}
+	var active, superseded knowledge.Document
+	for _, document := range documents {
+		if document.Status == knowledge.StatusActive {
+			active = document
+		} else {
+			superseded = document
+		}
+	}
+	if !strings.Contains(active.Content, "PostgreSQL") || superseded.Status != knowledge.StatusSuperseded || superseded.SupersededBy != active.SourceID || superseded.ConsolidationReason != "supersedes" {
+		t.Fatalf("unexpected consolidation: active=%#v superseded=%#v", active, superseded)
+	}
+	hits, err := retrieval.NewHybrid(repo).Search(context.Background(), retrieval.Query{Text: "Where does Ragfy store durable knowledge?", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Doc.SourceID != active.SourceID {
+		t.Fatalf("superseded knowledge was searchable: %#v", hits)
+	}
+}
+
+func TestDigestDoesNotLetLateProcessedOldSessionWin(t *testing.T) {
+	repo := openTestRepository(t)
+	newFact := "Ragfy stores durable knowledge in the PostgreSQL service."
+	oldFact := "Ragfy stores durable knowledge in an embedded file database."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(newFact, newFact), groundedFactJSON(oldFact, oldFact)}}
+	reconciler := &fakeReconciler{relation: reconciliation.RelationSupersedes}
+	service := newTestService(repo, repo, models, 1)
+	service.reconciler = reconciler
+	directory := t.TempDir()
+	digestFactAt(t, service, filepath.Join(directory, "new.jsonl"), "new", "ragfy", "2026-02-02T12:00:00Z", newFact)
+	digestFactAt(t, service, filepath.Join(directory, "old.jsonl"), "old", "ragfy", "2026-01-02T12:00:00Z", oldFact)
+
+	documents, err := repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, document := range documents {
+		if strings.Contains(document.Content, "PostgreSQL") && document.Status != knowledge.StatusActive {
+			t.Fatalf("newer knowledge was superseded: %#v", documents)
+		}
+		if strings.Contains(document.Content, "embedded file") && (document.Status != knowledge.StatusSuperseded || document.ConsolidationReason != "supersedes") {
+			t.Fatalf("late old knowledge remained active: %#v", documents)
+		}
+	}
+}
+
+func TestDigestUnifiesDuplicateKnowledgeAndPreservesBothRecords(t *testing.T) {
+	repo := openTestRepository(t)
+	fact := "Ragfy uses a persistent Go service for prompt hooks."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(fact, fact), groundedFactJSON(fact, fact)}}
+	reconciler := &fakeReconciler{relation: reconciliation.RelationDuplicate}
+	service := newTestService(repo, repo, models, 1)
+	service.reconciler = reconciler
+	directory := t.TempDir()
+	digestFactAt(t, service, filepath.Join(directory, "first.jsonl"), "first", "ragfy", "2026-01-02T12:00:00Z", fact)
+	digestFactAt(t, service, filepath.Join(directory, "second.jsonl"), "second", "ragfy", "2026-02-02T12:00:00Z", fact)
+
+	documents, err := repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, superseded := 0, 0
+	for _, document := range documents {
+		switch document.Status {
+		case knowledge.StatusActive:
+			active++
+		case knowledge.StatusSuperseded:
+			superseded++
+			if document.ConsolidationReason != "duplicate" || document.SupersededBy == "" {
+				t.Fatalf("duplicate provenance missing: %#v", document)
+			}
+		}
+	}
+	if len(documents) != 2 || active != 1 || superseded != 1 {
+		t.Fatalf("duplicates were not unified: %#v", documents)
+	}
+}
+
+func TestDigestReconciliationFailurePreservesSessionState(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	first := "Ragfy uses a persistent Go service for prompt hooks."
+	second := "Ragfy uses a supervised worker service for prompt hooks."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(first, first), groundedFactJSON(second, second)}}
+	reconciler := &fakeReconciler{}
+	service := newTestService(repo, repo, models, 1)
+	service.reconciler = reconciler
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	digestFactAt(t, service, transcript, "session", "ragfy", "2026-01-02T12:00:00Z", first)
+	firstData, err := os.ReadFile(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler.err = errors.New("reconciliation unavailable")
+	writeCodexTranscriptAt(t, transcript, "2026-02-02T12:00:00Z", second, strings.Repeat("Durable implementation context. ", 25))
+	if err := service.Digest(ctx, api.HookPayload{SessionID: "session", Source: "codex", Transcript: transcript, CWD: "/workspace/ragfy"}); err == nil {
+		t.Fatal("digest succeeded while reconciliation failed")
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || !strings.Contains(documents[0].Content, "persistent Go service") {
+		t.Fatalf("failed reconciliation replaced prior knowledge: %#v", documents)
+	}
+	if done, err := repo.HasSession(ctx, "session", SHA256Hex(firstData)); err != nil || !done {
+		t.Fatalf("previous transcript hash was not preserved: done=%v err=%v", done, err)
+	}
+}
+
+func TestDigestKeepsAmbiguousAndCrossProjectKnowledgeActive(t *testing.T) {
+	repo := openTestRepository(t)
+	first := "Ragfy stores project configuration in a local repository."
+	second := "Another project stores configuration in a remote repository."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(first, first), groundedFactJSON(second, second)}}
+	reconciler := &fakeReconciler{relation: reconciliation.RelationSupersedes}
+	service := newTestService(repo, repo, models, 1)
+	service.reconciler = reconciler
+	directory := t.TempDir()
+	digestFactAt(t, service, filepath.Join(directory, "ragfy.jsonl"), "ragfy-session", "ragfy", "2026-01-02T12:00:00Z", first)
+	digestFactAt(t, service, filepath.Join(directory, "other.jsonl"), "other-session", "other", "2026-02-02T12:00:00Z", second)
+
+	documents, err := repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 2 || documents[0].Status != knowledge.StatusActive || documents[1].Status != knowledge.StatusActive || len(reconciler.requests[1].Existing) != 0 {
+		t.Fatalf("cross-project knowledge was reconciled: documents=%#v request=%#v", documents, reconciler.requests[1])
+	}
+
+	// An empty reconciliation result represents an ambiguous or complementary pair.
+	third := "Ragfy stores configuration and operational metadata locally."
+	models.generated = append(models.generated, groundedFactJSON(third, third))
+	reconciler.relation = ""
+	digestFactAt(t, service, filepath.Join(directory, "ambiguous.jsonl"), "ambiguous", "ragfy", "2026-03-02T12:00:00Z", third)
+	documents, err = repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := 0
+	for _, document := range documents {
+		if document.Status == knowledge.StatusActive {
+			active++
+		}
+	}
+	if active != 3 {
+		t.Fatalf("ambiguous knowledge was superseded: %#v", documents)
+	}
+}
+
+func TestTranscriptChronologyUsesMessageTimestamp(t *testing.T) {
+	data := []byte("{\"timestamp\":\"2026-01-02T12:00:00Z\"}\n{\"payload\":{\"timestamp\":\"2026-01-03T12:00:00Z\"}}\n")
+	got := digest.TranscriptTimestamp(data, time.Unix(1, 0))
+	if want := "2026-01-03T12:00:00Z"; got.Format(time.RFC3339) != want {
+		t.Fatalf("timestamp=%s want=%s", got, want)
 	}
 }
 

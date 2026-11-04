@@ -22,6 +22,7 @@ import (
 	"ragfy/internal/hook"
 	"ragfy/internal/model"
 	"ragfy/internal/platform"
+	"ragfy/internal/reconciliation"
 	"ragfy/internal/retrieval"
 	"ragfy/internal/service"
 	"ragfy/internal/settings"
@@ -136,6 +137,10 @@ func serve() error {
 	if err := os.WriteFile(schemaPath, []byte(digest.JSONSchema+"\n"), 0600); err != nil {
 		return err
 	}
+	reconciliationSchemaPath := filepath.Join(agentDirectory, "reconciliation.schema.json")
+	if err := os.WriteFile(reconciliationSchemaPath, []byte(reconciliation.JSONSchema+"\n"), 0600); err != nil {
+		return err
+	}
 	codexExecutable, err := findAgentExecutable("codex")
 	if err != nil {
 		return err
@@ -148,11 +153,16 @@ func serve() error {
 		"codex":  extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath)),
 		"claude": extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema)),
 	})
+	reconciler := reconciliation.NewRouter(map[string]reconciliation.Reconciler{
+		"codex":  reconciliation.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, reconciliationSchemaPath)),
+		"claude": reconciliation.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, reconciliation.JSONSchema)),
+	})
 	applicationService := service.New(service.Dependencies{
 		Repository: repository,
 		Embedder:   embedder,
 		Extractor:  extractor,
 		Retriever:  retrieval.NewHybrid(repository),
+		Reconciler: reconciler,
 		Chunker:    chunking.NewText(1200, 160),
 	})
 	applicationService.StartWorker(ctx)

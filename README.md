@@ -39,7 +39,7 @@ On first startup, Ragfy downloads the fixed embedding GGUF model to the applicat
 
 - Qwen3-Embedding-0.6B Q8_0 for multilingual embeddings (about 639 MB).
 
-Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence. Extraction uses the full clean conversational spine by default. Oversized spines are split at message boundaries with overlap, then the candidates are consolidated and validated against the complete conversation.
+Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence. Extraction uses the full clean conversational spine by default. Oversized spines are split at message boundaries with overlap, then the candidates are consolidated and validated against the complete conversation. After extraction, the same provider reconciles semantically close records from earlier sessions. Confirmed newer states supersede older ones, while ambiguous or complementary records remain active. Superseded records are retained for audit but excluded from recall.
 
 SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 
@@ -53,7 +53,7 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 
 ```text
 UserPromptSubmit -> provider hook -> local service -> local embeddings + hybrid search -> context
-SessionEnd       -> provider hook -> digestion queue -> matching provider CLI -> typed records -> local embedding -> SQLite
+SessionEnd       -> provider hook -> digestion queue -> extraction -> embedding -> cross-session reconciliation -> SQLite
 ```
 
 The Go source follows the standard command-plus-internal-packages layout:
@@ -63,6 +63,7 @@ cmd/ragfy                 executable composition
 internal/api              hook transport contract
 internal/chunking         replaceable document splitting
 internal/extraction       replaceable knowledge extraction
+internal/reconciliation   replaceable cross-session knowledge reconciliation
 internal/knowledge        persistence contract and domain types
 internal/storage/sqlite   SQLite adapter and schema
 internal/model            generation and embedding contracts, plus llama.cpp
@@ -74,7 +75,7 @@ internal/platform         operating-system integration
 internal/settings         process-level constants
 ```
 
-Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Recall combines global knowledge with knowledge belonging to the current working-directory project and excludes other projects.
+Generation, embedding, chunking, extraction, reconciliation and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, reconcilers, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Reconciliation compares only compatible records in the same scope and project, uses transcript chronology rather than processing order, and commits session replacement plus supersession links atomically. Recall combines global knowledge with knowledge belonging to the current working-directory project, excludes other projects, and ignores superseded records.
 
 The default retriever combines semantic similarity with field-aware BM25, gives titles more lexical weight, applies a small current-project boost, drops candidates that fall materially below the best result, and uses MMR to avoid redundant context. It may return fewer than four records when the remaining candidates are weak.
 

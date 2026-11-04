@@ -4,9 +4,13 @@ import "context"
 
 type Scope string
 
+type Status string
+
 const (
-	ScopeGlobal  Scope = "global"
-	ScopeProject Scope = "project"
+	ScopeGlobal      Scope  = "global"
+	ScopeProject     Scope  = "project"
+	StatusActive     Status = "active"
+	StatusSuperseded Status = "superseded"
 )
 
 func (scope Scope) Valid() bool {
@@ -14,17 +18,21 @@ func (scope Scope) Valid() bool {
 }
 
 type Document struct {
-	Source   string         `json:"source"`
-	SourceID string         `json:"source_id"`
-	TS       string         `json:"ts"`
-	Title    string         `json:"title"`
-	Content  string         `json:"content"`
-	Metadata map[string]any `json:"metadata"`
-	Kind     string         `json:"kind"`
-	Area     string         `json:"area"`
-	Scope    Scope          `json:"scope"`
-	Project  string         `json:"project,omitempty"`
-	Vector   []float32      `json:"-"`
+	Source              string         `json:"source"`
+	SourceID            string         `json:"source_id"`
+	TS                  string         `json:"ts"`
+	Title               string         `json:"title"`
+	Content             string         `json:"content"`
+	Metadata            map[string]any `json:"metadata"`
+	Kind                string         `json:"kind"`
+	Area                string         `json:"area"`
+	Scope               Scope          `json:"scope"`
+	Project             string         `json:"project,omitempty"`
+	Status              Status         `json:"status"`
+	SupersededBy        string         `json:"superseded_by,omitempty"`
+	SupersededAt        string         `json:"superseded_at,omitempty"`
+	ConsolidationReason string         `json:"consolidation_reason,omitempty"`
+	Vector              []float32      `json:"-"`
 }
 
 func (document Document) HasValidScope() bool {
@@ -39,6 +47,19 @@ type Hit struct {
 	Doc           Document
 }
 
+type Supersession struct {
+	LoserSourceID  string
+	WinnerSourceID string
+	Reason         string
+}
+
+type SessionCommit struct {
+	SessionID      string
+	TranscriptHash string
+	Documents      []Document
+	Supersessions  []Supersession
+}
+
 type Repository interface {
 	Upsert(context.Context, Document) error
 	EmbeddingModel(context.Context) (string, error)
@@ -46,6 +67,5 @@ type Repository interface {
 	Documents(context.Context) ([]Document, error)
 	UpdateEmbedding(context.Context, string, string, []float32) error
 	HasSession(context.Context, string, string) (bool, error)
-	MarkSession(context.Context, string, string) (bool, error)
-	DeleteSessionDocs(context.Context, string) error
+	CommitSession(context.Context, SessionCommit) error
 }

@@ -2,12 +2,47 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
 	"ragfy/internal/knowledge"
 	"ragfy/internal/retrieval"
 )
+
+func TestOpenMigratesExistingRagfyDatabaseForSupersession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.sqlite")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`CREATE TABLE docs (
+id INTEGER PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
+ts TEXT, title TEXT, content TEXT NOT NULL, metadata TEXT, kind TEXT, area TEXT,
+scope TEXT NOT NULL, project TEXT NOT NULL, embedding BLOB, UNIQUE(source,source_id));`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := Open(Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	if err := repo.Upsert(context.Background(), knowledge.Document{Source: "transcripts", SourceID: "migrated", Content: "existing knowledge", Scope: knowledge.ScopeGlobal, Vector: []float32{1}}); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.Documents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].Status != knowledge.StatusActive {
+		t.Fatalf("migration did not initialize active status: %#v", documents)
+	}
+}
 
 func openTestRepository(t *testing.T) *Repository {
 	t.Helper()
@@ -144,5 +179,45 @@ func TestSQLiteRepositoryUpsertReplacesExistingDocument(t *testing.T) {
 	}
 	if len(docs) != 1 || docs[0].Title != "new" || docs[0].Content != "new content" {
 		t.Fatalf("upsert did not replace document: %#v", docs)
+	}
+}
+
+func TestSQLiteCommitSessionIsAtomicAndRestoresReplacedWinnerDependents(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	documents := []knowledge.Document{
+		{Source: "transcripts", SourceID: "winner", Title: "winner", Content: "winner", Scope: knowledge.ScopeProject, Project: "ragfy", Status: knowledge.StatusActive, Metadata: map[string]any{"session_id": "replace"}, Vector: []float32{1}},
+		{Source: "transcripts", SourceID: "dependent", Title: "dependent", Content: "dependent", Scope: knowledge.ScopeProject, Project: "ragfy", Status: knowledge.StatusSuperseded, SupersededBy: "winner", Metadata: map[string]any{"session_id": "other"}, Vector: []float32{1}},
+	}
+	for _, document := range documents {
+		if err := repo.Upsert(ctx, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invalid := knowledge.Document{Source: "transcripts", SourceID: "new", Title: "new", Content: "new", Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "replace"}, Vector: []float32{1}}
+	err := repo.CommitSession(ctx, knowledge.SessionCommit{
+		SessionID: "replace", TranscriptHash: "hash-b", Documents: []knowledge.Document{invalid},
+		Supersessions: []knowledge.Supersession{{LoserSourceID: "missing", WinnerSourceID: "new", Reason: "supersedes"}},
+	})
+	if err == nil {
+		t.Fatal("commit accepted a missing supersession loser")
+	}
+	stored, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 2 || stored[0].SourceID != "winner" || stored[1].Status != knowledge.StatusSuperseded {
+		t.Fatalf("failed transaction changed documents: %#v", stored)
+	}
+
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "replace", TranscriptHash: "hash-c", Documents: []knowledge.Document{invalid}}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 2 || stored[0].SourceID != "dependent" || stored[0].Status != knowledge.StatusActive || stored[1].SourceID != "new" {
+		t.Fatalf("replacement did not restore dependent: %#v", stored)
 	}
 }

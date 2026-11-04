@@ -4,7 +4,10 @@ const schema = `PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS docs (
  id INTEGER PRIMARY KEY, source TEXT NOT NULL, source_id TEXT NOT NULL,
  ts TEXT, title TEXT, content TEXT NOT NULL, metadata TEXT, kind TEXT, area TEXT,
- scope TEXT NOT NULL, project TEXT NOT NULL, embedding BLOB, UNIQUE(source,source_id));
+ scope TEXT NOT NULL, project TEXT NOT NULL, embedding BLOB,
+ status TEXT NOT NULL DEFAULT 'active', superseded_by TEXT NOT NULL DEFAULT '',
+ superseded_at TEXT NOT NULL DEFAULT '', consolidation_reason TEXT NOT NULL DEFAULT '',
+ UNIQUE(source,source_id));
 CREATE TABLE IF NOT EXISTS digested_sessions (
  session_id TEXT PRIMARY KEY, transcript_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS app_metadata (

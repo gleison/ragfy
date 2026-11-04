@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
 	"ragfy/internal/model"
+	"ragfy/internal/reconciliation"
 	"ragfy/internal/retrieval"
 )
 
@@ -37,6 +40,7 @@ type Service struct {
 	embedder   model.Embedder
 	extractor  extraction.Extractor
 	retriever  retrieval.Retriever
+	reconciler reconciliation.Reconciler
 	chunker    chunking.Chunker
 	queue      chan api.HookPayload
 	digestLock sync.Mutex
@@ -47,6 +51,7 @@ type Dependencies struct {
 	Embedder   model.Embedder
 	Extractor  extraction.Extractor
 	Retriever  retrieval.Retriever
+	Reconciler reconciliation.Reconciler
 	Chunker    chunking.Chunker
 }
 
@@ -55,11 +60,16 @@ func New(dependencies Dependencies) *Service {
 }
 
 func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service {
+	reconciler := dependencies.Reconciler
+	if reconciler == nil {
+		reconciler = reconciliation.None{}
+	}
 	return &Service{
 		repository: dependencies.Repository,
 		embedder:   dependencies.Embedder,
 		extractor:  dependencies.Extractor,
 		retriever:  dependencies.Retriever,
+		reconciler: reconciler,
 		chunker:    dependencies.Chunker,
 		queue:      make(chan api.HookPayload, queueCapacity),
 	}
@@ -302,6 +312,11 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		return err
 	}
 	transcriptHash := SHA256Hex(transcript)
+	info, err := os.Stat(payload.Transcript)
+	if err != nil {
+		return err
+	}
+	sessionTimestamp := digest.TranscriptTimestamp(transcript, info.ModTime()).Format(time.RFC3339Nano)
 	service.digestLock.Lock()
 	defer service.digestLock.Unlock()
 	sessionID := payload.SessionID
@@ -319,11 +334,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	spine := digest.TranscriptSpine(transcript)
 	if len(spine) < minimumSpineCharacters {
 		log.Printf("digest %s: skipped extraction spine_characters=%d minimum=%d stored=0", sessionID, len(spine), minimumSpineCharacters)
-		if err := service.repository.DeleteSessionDocs(ctx, sessionID); err != nil {
-			return err
-		}
-		_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
-		return err
+		return service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash})
 	}
 	project := projectName(payload.CWD)
 	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Source: payload.Source, Project: project, Spine: spine})
@@ -338,13 +349,11 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	if err != nil {
 		return err
 	}
-	if err := service.repository.DeleteSessionDocs(ctx, sessionID); err != nil {
-		return err
-	}
 	for index := range documents {
 		document := &documents[index]
 		document.Vector = vectors[index]
-		document.TS = time.Now().UTC().Format(time.RFC3339)
+		document.TS = sessionTimestamp
+		document.Status = knowledge.StatusActive
 		if document.Metadata == nil {
 			document.Metadata = make(map[string]any)
 		}
@@ -357,14 +366,138 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		} else {
 			document.Project = ""
 		}
-		document.SourceID = SHA256Hex([]byte(string(document.Scope) + "\n" + document.Project + "\n" + document.Kind + "\n" + document.Content))
-		if err := service.repository.Upsert(ctx, *document); err != nil {
-			return err
+		document.SourceID = SHA256Hex([]byte(sessionID + "\n" + string(document.Scope) + "\n" + document.Project + "\n" + document.Kind + "\n" + document.Content))
+	}
+	stored, err := service.repository.Documents(ctx)
+	if err != nil {
+		return err
+	}
+	candidates := reconciliationCandidates(documents, stored, sessionID)
+	actions, err := service.reconciler.Reconcile(ctx, reconciliation.Request{SessionID: sessionID, Source: payload.Source, Project: project, New: documents, Existing: candidates})
+	if err != nil {
+		return err
+	}
+	supersessions := resolveSupersessions(actions, documents, candidates)
+	if err := service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash, Documents: documents, Supersessions: supersessions}); err != nil {
+		return err
+	}
+	log.Printf("digest %s: stored=%d reconciliation_candidates=%d superseded=%d", sessionID, len(documents), len(candidates), len(supersessions))
+	return nil
+}
+
+const (
+	reconciliationSimilarity        = 0.72
+	maximumReconciliationCandidates = 4
+)
+
+type scoredDocument struct {
+	document knowledge.Document
+	score    float64
+}
+
+func reconciliationCandidates(newDocuments, stored []knowledge.Document, sessionID string) []knowledge.Document {
+	replaced := make(map[string]bool)
+	for _, document := range stored {
+		if metadataString(document.Metadata, "session_id") == sessionID {
+			replaced[document.SourceID] = true
 		}
 	}
-	log.Printf("digest %s: stored=%d", sessionID, len(documents))
-	_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
-	return err
+	selected := make(map[string]knowledge.Document)
+	for _, incoming := range newDocuments {
+		if incoming.Kind == "problem" {
+			continue
+		}
+		var scored []scoredDocument
+		for _, existing := range stored {
+			if existing.Source != "transcripts" || metadataString(existing.Metadata, "session_id") == sessionID || existing.Kind == "problem" {
+				continue
+			}
+			active := existing.Status == "" || existing.Status == knowledge.StatusActive || replaced[existing.SupersededBy]
+			if !active || incoming.Kind != existing.Kind || incoming.Scope != existing.Scope || incoming.Project != existing.Project {
+				continue
+			}
+			score := vectorSimilarity(incoming.Vector, existing.Vector)
+			if score >= reconciliationSimilarity {
+				scored = append(scored, scoredDocument{document: existing, score: score})
+			}
+		}
+		sort.Slice(scored, func(first, second int) bool { return scored[first].score > scored[second].score })
+		for _, candidate := range scored[:min(len(scored), maximumReconciliationCandidates)] {
+			selected[candidate.document.SourceID] = candidate.document
+		}
+	}
+	result := make([]knowledge.Document, 0, len(selected))
+	for _, document := range selected {
+		result = append(result, document)
+	}
+	sort.Slice(result, func(first, second int) bool { return result[first].SourceID < result[second].SourceID })
+	return result
+}
+
+func resolveSupersessions(actions []reconciliation.Action, newDocuments, existingDocuments []knowledge.Document) []knowledge.Supersession {
+	newByID := documentsBySourceID(newDocuments)
+	existingByID := documentsBySourceID(existingDocuments)
+	resolved := make(map[string]knowledge.Supersession)
+	winnerTimes := make(map[string]time.Time)
+	for _, action := range actions {
+		incoming, incomingExists := newByID[action.NewSourceID]
+		existing, existingExists := existingByID[action.ExistingSourceID]
+		if !incomingExists || !existingExists {
+			continue
+		}
+		if incoming.Kind == "problem" || incoming.Kind != existing.Kind || incoming.Scope != existing.Scope || incoming.Project != existing.Project || vectorSimilarity(incoming.Vector, existing.Vector) < reconciliationSimilarity {
+			continue
+		}
+		incomingTime, incomingErr := time.Parse(time.RFC3339Nano, incoming.TS)
+		existingTime, existingErr := time.Parse(time.RFC3339Nano, existing.TS)
+		loser, winner := existing, incoming
+		winnerTime := incomingTime
+		if incomingErr != nil || existingErr == nil && !incomingTime.After(existingTime) {
+			loser, winner = incoming, existing
+			winnerTime = existingTime
+		}
+		if currentTime, exists := winnerTimes[loser.SourceID]; exists && !winnerTime.After(currentTime) {
+			continue
+		}
+		winnerTimes[loser.SourceID] = winnerTime
+		resolved[loser.SourceID] = knowledge.Supersession{LoserSourceID: loser.SourceID, WinnerSourceID: winner.SourceID, Reason: string(action.Relation)}
+	}
+	result := make([]knowledge.Supersession, 0, len(resolved))
+	for _, supersession := range resolved {
+		result = append(result, supersession)
+	}
+	sort.Slice(result, func(first, second int) bool { return result[first].LoserSourceID < result[second].LoserSourceID })
+	return result
+}
+
+func documentsBySourceID(documents []knowledge.Document) map[string]knowledge.Document {
+	result := make(map[string]knowledge.Document, len(documents))
+	for _, document := range documents {
+		result[document.SourceID] = document
+	}
+	return result
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	value, _ := metadata[key].(string)
+	return value
+}
+
+func vectorSimilarity(first, second []float32) float64 {
+	if len(first) == 0 || len(first) != len(second) {
+		return 0
+	}
+	var dot, firstMagnitude, secondMagnitude float64
+	for index := range first {
+		left, right := float64(first[index]), float64(second[index])
+		dot += left * right
+		firstMagnitude += left * left
+		secondMagnitude += right * right
+	}
+	if firstMagnitude == 0 || secondMagnitude == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(firstMagnitude) * math.Sqrt(secondMagnitude))
 }
 
 func projectName(workingDirectory string) string {
