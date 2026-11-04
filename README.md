@@ -1,4 +1,10 @@
-# Ragfy
+<p align="center">
+  <img src="assets/icons/ragfy.png" alt="Ragfy brain with internal connections" width="300">
+</p>
+
+<h1 align="center">Ragfy</h1>
+
+<p align="center"><strong>Your local second brain for Claude Code and Codex.</strong></p>
 
 A local knowledge base for Claude Code and Codex. A Go service keeps the embedding and digestion models loaded; hooks make short calls to the service to retrieve context before a prompt and digest the session when it ends.
 
