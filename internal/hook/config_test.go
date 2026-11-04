@@ -59,10 +59,10 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe := "/Applications/Ragfy Tools/ragfy"
-	if err := MergeConfig(path, exe); err != nil {
+	if err := MergeConfig(path, exe, "codex"); err != nil {
 		t.Fatal(err)
 	}
-	if err := MergeConfig(path, exe); err != nil {
+	if err := MergeConfig(path, exe, "codex"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,7 +71,7 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 		t.Fatalf("unrelated root data was lost: %#v", root)
 	}
 	commands := hookCommands(t, root, "UserPromptSubmit")
-	recallCommand := `"/Applications/Ragfy Tools/ragfy" hook recall`
+	recallCommand := `"/Applications/Ragfy Tools/ragfy" hook recall codex`
 	counts := map[string]int{}
 	for _, command := range commands {
 		value, _ := command["command"].(string)
@@ -85,7 +85,7 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 	}
 
 	digestCommands := hookCommands(t, root, "SessionEnd")
-	if len(digestCommands) != 1 || digestCommands[0]["command"] != `"/Applications/Ragfy Tools/ragfy" hook digest` || digestCommands[0]["timeout"] != float64(2) {
+	if len(digestCommands) != 1 || digestCommands[0]["command"] != `"/Applications/Ragfy Tools/ragfy" hook digest codex` || digestCommands[0]["timeout"] != float64(2) {
 		t.Fatalf("unexpected digest hook: %#v", digestCommands)
 	}
 	if len(hookCommands(t, root, "PostToolUse")) != 1 {
@@ -104,7 +104,7 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	created := filepath.Join(dir, "new", "hooks.json")
-	if err := MergeConfig(created, "/usr/local/bin/ragfy"); err != nil {
+	if err := MergeConfig(created, "/usr/local/bin/ragfy", "claude"); err != nil {
 		t.Fatal(err)
 	}
 	root := readHookConfig(t, created)
@@ -116,7 +116,7 @@ func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 	if err := os.WriteFile(invalid, []byte(`{"hooks":`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := MergeConfig(invalid, "/usr/local/bin/ragfy"); err == nil {
+	if err := MergeConfig(invalid, "/usr/local/bin/ragfy", "claude"); err == nil {
 		t.Fatal("invalid JSON hook config was accepted")
 	}
 }

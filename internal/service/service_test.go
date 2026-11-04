@@ -197,7 +197,7 @@ func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
 	filler := strings.Repeat("The implementation discussion contains durable technical context. ", 12)
 	writeCodexTranscript(t, transcript, firstEvidence, filler)
-	payload := api.HookPayload{SessionID: "session-1", Transcript: transcript, CWD: "/workspace/ragfy"}
+	payload := api.HookPayload{SessionID: "session-1", Source: "codex", Transcript: transcript, CWD: "/workspace/ragfy"}
 
 	if err := service.Digest(ctx, payload); err != nil {
 		t.Fatal(err)
@@ -220,7 +220,7 @@ func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 	if len(docs) != 1 || !strings.Contains(docs[0].Content, "SQLite repository") {
 		t.Fatalf("session knowledge was not replaced: %#v", docs)
 	}
-	if docs[0].Metadata["session_id"] != "session-1" || docs[0].Metadata["project"] != "ragfy" || docs[0].Metadata["evidence"] != secondEvidence {
+	if docs[0].Metadata["session_id"] != "session-1" || docs[0].Metadata["project"] != "ragfy" || docs[0].Metadata["agent_source"] != "codex" || docs[0].Metadata["evidence"] != secondEvidence {
 		t.Fatalf("missing digest metadata: %#v", docs[0].Metadata)
 	}
 }

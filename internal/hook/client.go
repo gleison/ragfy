@@ -12,12 +12,29 @@ import (
 	"ragfy/internal/api"
 )
 
-func Run(action, dataDirectory, listenAddress string, input io.Reader, output io.Writer) {
+func Run(action, source, dataDirectory, listenAddress string, input io.Reader, output io.Writer) {
+	timeout := 4 * time.Second
+	if action == "digest" {
+		timeout = 2 * time.Second
+	}
+	run(action, source, dataDirectory, listenAddress, input, output, &http.Client{Timeout: timeout})
+}
+
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func run(action, source, dataDirectory, listenAddress string, input io.Reader, output io.Writer, client httpDoer) {
+	if os.Getenv("RAGFY_AGENT_EXEC") != "" {
+		return
+	}
 	payloadBytes, _ := io.ReadAll(io.LimitReader(input, 4<<20))
 	var payload api.HookPayload
 	if json.Unmarshal(payloadBytes, &payload) != nil {
 		return
 	}
+	payload.Source = source
+	payloadBytes, _ = json.Marshal(payload)
 	endpoint := "/recall"
 	if action == "digest" || strings.EqualFold(payload.Event, "SessionEnd") || strings.EqualFold(payload.EventCodex, "SessionEnd") {
 		endpoint = "/digest"
@@ -29,11 +46,7 @@ func Run(action, dataDirectory, listenAddress string, input io.Reader, output io
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
 	request.Header.Set("Content-Type", "application/json")
-	timeout := 4 * time.Second
-	if endpoint == "/digest" {
-		timeout = 2 * time.Second
-	}
-	response, err := (&http.Client{Timeout: timeout}).Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return
 	}

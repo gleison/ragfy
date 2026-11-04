@@ -14,16 +14,19 @@ func Setup(executable string) error {
 	if err != nil {
 		return err
 	}
-	for _, path := range []string{filepath.Join(home, ".claude", "settings.json"), filepath.Join(home, ".codex", "hooks.json")} {
-		if err := MergeConfig(path, executable); err != nil {
+	for _, target := range []struct{ path, source string }{
+		{filepath.Join(home, ".claude", "settings.json"), "claude"},
+		{filepath.Join(home, ".codex", "hooks.json"), "codex"},
+	} {
+		if err := MergeConfig(target.path, executable, target.source); err != nil {
 			return err
 		}
-		fmt.Println("Hooks atualizados:", path)
+		fmt.Println("Hooks atualizados:", target.path)
 	}
 	return nil
 }
 
-func MergeConfig(path, executable string) error {
+func MergeConfig(path, executable, source string) error {
 	root, err := readConfig(path)
 	if err != nil {
 		return err
@@ -34,16 +37,15 @@ func MergeConfig(path, executable string) error {
 		root["hooks"] = hooks
 	}
 	removeLegacyPythonRecallHooks(hooks)
+	removeExecutableHooks(hooks, executable)
 	for event, action := range map[string]string{"UserPromptSubmit": "recall", "SessionEnd": "digest"} {
-		command := strconv.Quote(executable) + " hook " + action
+		command := strconv.Quote(executable) + " hook " + action + " " + source
 		timeout := 4
 		if event == "SessionEnd" {
 			timeout = 2
 		}
 		entries, _ := hooks[event].([]any)
-		if !containsCommand(entries, command) {
-			hooks[event] = append(entries, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "timeout": timeout}}})
-		}
+		hooks[event] = append(entries, map[string]any{"hooks": []any{map[string]any{"type": "command", "command": command, "timeout": timeout}}})
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -75,20 +77,6 @@ func readConfig(path string) (map[string]any, error) {
 	return root, nil
 }
 
-func containsCommand(entries []any, command string) bool {
-	for _, rawEntry := range entries {
-		entry, _ := rawEntry.(map[string]any)
-		hooks, _ := entry["hooks"].([]any)
-		for _, rawHook := range hooks {
-			hook, _ := rawHook.(map[string]any)
-			if hook["command"] == command {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func removeLegacyPythonRecallHooks(hooks map[string]any) {
 	entries, ok := hooks["UserPromptSubmit"].([]any)
 	if !ok {
@@ -116,4 +104,33 @@ func removeLegacyPythonRecallHooks(hooks map[string]any) {
 		}
 	}
 	hooks["UserPromptSubmit"] = keptEntries
+}
+
+func removeExecutableHooks(hooks map[string]any, executable string) {
+	prefix := strconv.Quote(executable) + " hook "
+	for _, event := range []string{"UserPromptSubmit", "SessionEnd"} {
+		entries, _ := hooks[event].([]any)
+		keptEntries := make([]any, 0, len(entries))
+		for _, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]any)
+			if !ok {
+				keptEntries = append(keptEntries, rawEntry)
+				continue
+			}
+			children, _ := entry["hooks"].([]any)
+			keptChildren := make([]any, 0, len(children))
+			for _, rawChild := range children {
+				child, _ := rawChild.(map[string]any)
+				command, _ := child["command"].(string)
+				if !strings.HasPrefix(command, prefix) {
+					keptChildren = append(keptChildren, rawChild)
+				}
+			}
+			if len(keptChildren) > 0 {
+				entry["hooks"] = keptChildren
+				keptEntries = append(keptEntries, entry)
+			}
+		}
+		hooks[event] = keptEntries
+	}
 }

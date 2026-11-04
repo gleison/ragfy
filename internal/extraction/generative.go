@@ -25,8 +25,9 @@ func (extractor *Generative) Extract(ctx context.Context, request Request) ([]kn
 	if err != nil {
 		return nil, err
 	}
-	documents, err := digest.ParseRecords(response, request.Spine)
+	documents, audit, err := digest.ParseRecordsWithAudit(response, request.Spine)
 	if err == nil {
+		log.Printf("digest %s: extraction source=%s %s", request.SessionID, request.Source, audit.Summary())
 		return documents, nil
 	}
 	log.Printf("digest %s: invalid structured response (%v); retrying once with strict JSON instructions", request.SessionID, err)
@@ -35,9 +36,10 @@ func (extractor *Generative) Extract(ctx context.Context, request Request) ([]kn
 	if err != nil {
 		return nil, err
 	}
-	documents, err = digest.ParseRecords(response, request.Spine)
+	documents, audit, err = digest.ParseRecordsWithAudit(response, request.Spine)
 	if err != nil {
 		return nil, fmt.Errorf("digest model response did not contain valid JSON after retry: %w", err)
 	}
+	log.Printf("digest %s: extraction source=%s %s", request.SessionID, request.Source, audit.Summary())
 	return documents, nil
 }

@@ -8,12 +8,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"ragfy/internal/chunking"
+	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/hook"
 	"ragfy/internal/model"
@@ -29,11 +31,15 @@ var errUnknownCommand = errors.New("unknown command")
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "hook" {
 		action := ""
+		source := ""
 		if len(os.Args) > 2 {
 			action = os.Args[2]
 		}
+		if len(os.Args) > 3 {
+			source = os.Args[3]
+		}
 		dataDirectory, _ := platform.AppDataDir()
-		hook.Run(action, dataDirectory, settings.ListenAddress, os.Stdin, os.Stdout)
+		hook.Run(action, source, dataDirectory, settings.ListenAddress, os.Stdin, os.Stdout)
 		return
 	}
 	command := "serve"
@@ -101,22 +107,42 @@ func serve() error {
 	defer repository.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	log.Println("initializing local models; missing model files will be downloaded")
-	models, err := model.NewLlama(ctx, filepath.Join(dataDirectory, "models"))
+	log.Println("initializing local embedding model; missing model files will be downloaded")
+	embedder, err := model.NewEmbeddingLlama(ctx, filepath.Join(dataDirectory, "models"))
 	if err != nil {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
-	defer models.Close()
+	defer embedder.Close()
 	log.Println("startup: validating embedding model and stored vectors")
-	if err := service.RefreshEmbeddings(ctx, repository, models, model.EmbeddingVersion); err != nil {
+	if err := service.RefreshEmbeddings(ctx, repository, embedder, model.EmbeddingVersion); err != nil {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
+	agentDirectory := filepath.Join(dataDirectory, "agent-exec")
+	if err := os.MkdirAll(agentDirectory, 0700); err != nil {
+		return err
+	}
+	schemaPath := filepath.Join(agentDirectory, "digest.schema.json")
+	if err := os.WriteFile(schemaPath, []byte(digest.JSONSchema+"\n"), 0600); err != nil {
+		return err
+	}
+	codexExecutable, err := findAgentExecutable("codex")
+	if err != nil {
+		return err
+	}
+	claudeExecutable, err := findAgentExecutable("claude")
+	if err != nil {
+		return err
+	}
+	extractor := extraction.NewRouter(map[string]extraction.Extractor{
+		"codex":  extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath)),
+		"claude": extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema)),
+	})
 	applicationService := service.New(service.Dependencies{
 		Repository: repository,
-		Embedder:   models,
-		Extractor:  extraction.NewGenerative(models),
+		Embedder:   embedder,
+		Extractor:  extractor,
 		Retriever:  retrieval.NewHybrid(repository),
 		Chunker:    chunking.NewText(1200, 160),
 	})
@@ -134,6 +160,21 @@ func serve() error {
 		return nil
 	}
 	return err
+}
+
+func findAgentExecutable(name string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err == nil {
+		candidate := filepath.Join(home, ".local", "bin", name)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			return candidate, nil
+		}
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("%s executable not found: %w", name, err)
+	}
+	return path, nil
 }
 
 func prepareDataDirectory() (string, error) {
@@ -179,5 +220,5 @@ func setupHooks() error {
 }
 
 func usage() {
-	fmt.Println("ragfy {setup|serve|install|uninstall|status|setup-hooks|ingest <folder>|hook [recall|digest]}")
+	fmt.Println("ragfy {setup|serve|install|uninstall|status|setup-hooks|ingest <folder>|hook [recall|digest] [codex|claude]}")
 }

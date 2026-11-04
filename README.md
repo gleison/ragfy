@@ -6,11 +6,11 @@
 
 <p align="center"><strong>Your local second brain for Claude Code and Codex.</strong></p>
 
-A local knowledge base for Claude Code and Codex. A Go service keeps the embedding and digestion models loaded; hooks make short calls to the service to retrieve context before a prompt and digest the session when it ends.
+A local knowledge base for Claude Code and Codex. A Go service keeps the embedding model loaded; hooks make short calls to the service to retrieve context before a prompt and digest the session when it ends. Session extraction runs through the same agent provider that created the transcript.
 
 ## Build
 
-Requirements: Go 1.25+, Git, CMake, a C/C++ compiler, and `pkg-config`. The inference runtime uses `llama.cpp` through the `go-llama` Go binding.
+Requirements: Go 1.25+, Git, CMake, a C/C++ compiler, `pkg-config`, and authenticated Codex and Claude Code CLIs. The local embedding runtime uses `llama.cpp` through the `go-llama` Go binding.
 
 ```sh
 ./scripts/build-ragfy.sh
@@ -34,12 +34,11 @@ ragfy ingest ~/Documents/Knowledge
 
 ## Models and local data
 
-On first startup, Ragfy downloads the fixed MVP GGUF models to the application data directory and verifies their SHA-256 hashes:
+On first startup, Ragfy downloads the fixed embedding GGUF model to the application data directory and verifies its SHA-256 hash:
 
 - Qwen3-Embedding-0.6B Q8_0 for multilingual embeddings (about 639 MB).
-- Qwen3-4B Q4_K_M for transcript digestion (about 2.5 GB).
 
-Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. The weights stay in the local cache, and both models remain loaded while the service is running. Prompts and transcripts are not sent to a model API.
+Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence.
 
 SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 
@@ -52,8 +51,8 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 ## Architecture and legacy files
 
 ```text
-UserPromptSubmit -> Go hook -> local service -> embeddings + hybrid search -> context
-SessionEnd       -> Go hook -> digestion queue -> local Qwen -> typed records -> SQLite
+UserPromptSubmit -> provider hook -> local service -> local embeddings + hybrid search -> context
+SessionEnd       -> provider hook -> digestion queue -> matching provider CLI -> typed records -> local embedding -> SQLite
 ```
 
 The Go source follows the standard command-plus-internal-packages layout:
@@ -74,6 +73,6 @@ internal/platform         operating-system integration
 internal/settings         process-level constants
 ```
 
-Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition uses Qwen generation and embeddings, text chunking, hybrid semantic and lexical retrieval, and SQLite storage. Alternative algorithmic embedders or database-native retrievers can replace one capability without implementing the others.
+Generation, embedding, chunking, extraction and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, or database-native retrievers can replace one capability without implementing the others.
 
 The previous Python project is preserved in [`antigo/`](antigo/). Its connectors and evaluation and ingestion scripts are not used by the Go hooks.

@@ -1,9 +1,21 @@
 package digest
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+func TestJSONSchemaIsValid(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(JSONSchema), &schema); err != nil {
+		t.Fatalf("invalid digest JSON schema: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Fatalf("unexpected schema root: %#v", schema)
+	}
+}
 
 func TestParseRecordsRejectsInvalidExtraction(t *testing.T) {
 	spine := "USER: Ragfy runs as a persistent local Go daemon."
@@ -76,6 +88,66 @@ func TestParseRecordsRejectsUngroundedAndTransientKnowledge(t *testing.T) {
 				t.Fatalf("got unexpected documents: %#v", docs)
 			}
 		})
+	}
+}
+
+func TestParseRecordsAuditExplainsAcceptedAndRejectedCandidates(t *testing.T) {
+	spine := "USER: Ragfy uses SQLite for durable local storage.\n\nCODEX: Prefer SQLite for every project."
+	output := `{"problems":[],"facts":[{"fact":"Ragfy uses SQLite for durable local storage.","scope":"storage","status":"current","evidence":"Ragfy uses SQLite for durable local storage."},{"fact":"The current hash differs from the stored hash.","scope":"session","status":"current","evidence":"The current hash differs from the stored hash."}],"preferences":[{"preference":"Prefer SQLite for every project.","why":"","applies_to":"storage","evidence":"Prefer SQLite for every project."}],"decisions":[]}`
+	docs, audit, err := ParseRecordsWithAudit(output, spine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("got %d documents, want 1", len(docs))
+	}
+	want := "candidates=3 accepted=1 rejected=2 candidates_by_kind=fact:2,preference:1 accepted_by_kind=fact:1 rejection_reasons=evidence_not_from_user:1,transient_fact:1"
+	if got := audit.Summary(); got != want {
+		t.Fatalf("audit summary = %q, want %q", got, want)
+	}
+}
+
+func TestParseRecordsAuditDistinguishesEmptyModelResponse(t *testing.T) {
+	_, audit, err := ParseRecordsWithAudit(`{"problems":[],"facts":[],"preferences":[],"decisions":[]}`, "USER: General discussion with no durable knowledge.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "candidates=0 accepted=0 rejected=0 candidates_by_kind=none accepted_by_kind=none rejection_reasons=none"
+	if got := audit.Summary(); got != want {
+		t.Fatalf("audit summary = %q, want %q", got, want)
+	}
+}
+
+func TestParseRecordsAcceptsImplicitlyAcceptedDecision(t *testing.T) {
+	claim := "Use codex exec in read-only mode for Codex session extraction."
+	acceptance := "That is our next task; implement the proposed extractor."
+	spine := "CODEX: " + claim + "\n\nUSER: " + acceptance
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"Local generation","why":"Use the session provider","evidence":%q,"acceptance":"implicit","acceptance_evidence":%q}]}`, claim, acceptance)
+	docs, audit, err := ParseRecordsWithAudit(output, spine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 || docs[0].Kind != "decision" {
+		t.Fatalf("unexpected documents: %#v", docs)
+	}
+	if docs[0].Metadata["acceptance_evidence"] != acceptance {
+		t.Fatalf("acceptance evidence was not preserved: %#v", docs[0].Metadata)
+	}
+	if audit.Accepted["decision"] != 1 {
+		t.Fatalf("unexpected audit: %s", audit.Summary())
+	}
+}
+
+func TestParseRecordsRejectsImplicitDecisionWithoutLaterUserAction(t *testing.T) {
+	claim := "Use codex exec in read-only mode for Codex session extraction."
+	spine := "USER: Earlier context.\n\nCODEX: " + claim
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[],"decisions":[{"decision":"Use codex exec in read-only mode for Codex sessions.","rejected":"","why":"","evidence":%q,"acceptance":"implicit","acceptance_evidence":"Earlier context."}]}`, claim)
+	docs, audit, err := ParseRecordsWithAudit(output, spine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 0 || audit.Rejected["implicit_acceptance_not_from_later_user"] != 1 {
+		t.Fatalf("unexpected result: docs=%#v audit=%s", docs, audit.Summary())
 	}
 }
 

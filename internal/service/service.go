@@ -236,7 +236,7 @@ func (service *Service) worker(ctx context.Context) {
 			return
 		case payload := <-service.queue:
 			started := time.Now()
-			log.Printf("digest %s: processing transcript", payload.SessionID)
+			log.Printf("digest %s: processing transcript source=%s", payload.SessionID, payload.Source)
 			if err := service.Digest(ctx, payload); err != nil {
 				log.Printf("digest %s: %v", payload.SessionID, err)
 			} else {
@@ -306,11 +306,16 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		sessionID = transcriptHash
 	}
 	alreadyDigested, err := service.repository.HasSession(ctx, sessionID, transcriptHash)
-	if err != nil || alreadyDigested {
+	if err != nil {
 		return err
+	}
+	if alreadyDigested {
+		log.Printf("digest %s: skipped unchanged transcript source=%s", sessionID, payload.Source)
+		return nil
 	}
 	spine := digest.TranscriptSpine(transcript, digestSpineCharacters)
 	if len(spine) < minimumSpineCharacters {
+		log.Printf("digest %s: skipped extraction spine_characters=%d minimum=%d stored=0", sessionID, len(spine), minimumSpineCharacters)
 		if err := service.repository.DeleteSessionDocs(ctx, sessionID); err != nil {
 			return err
 		}
@@ -321,7 +326,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	if project == "." {
 		project = "unknown"
 	}
-	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Project: project, Spine: spine})
+	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Source: payload.Source, Project: project, Spine: spine})
 	if err != nil {
 		return err
 	}
@@ -345,12 +350,14 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 			document.Metadata = make(map[string]any)
 		}
 		document.Metadata["project"] = project
+		document.Metadata["agent_source"] = payload.Source
 		document.Metadata["session_id"] = sessionID
 		document.Metadata["transcript_hash"] = transcriptHash
 		if err := service.repository.Upsert(ctx, *document); err != nil {
 			return err
 		}
 	}
+	log.Printf("digest %s: stored=%d", sessionID, len(documents))
 	_, err = service.repository.MarkSession(ctx, sessionID, transcriptHash)
 	return err
 }

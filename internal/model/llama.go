@@ -43,6 +43,20 @@ var _ Embedder = (*Llama)(nil)
 var _ Generator = (*Llama)(nil)
 
 func NewLlama(ctx context.Context, directory string) (*Llama, error) {
+	return newLlama(ctx, directory, modelSpecifications(), []string{chatModel, embedModel}, chatModel)
+}
+
+func NewEmbeddingLlama(ctx context.Context, directory string) (*Llama, error) {
+	return newLlama(ctx, directory, []modelSpecification{embeddingModelSpecification()}, []string{embedModel}, "")
+}
+
+type modelSpecification struct {
+	name   string
+	url    string
+	sha256 string
+}
+
+func newLlama(ctx context.Context, directory string, specifications []modelSpecification, loadNames []string, chatName string) (*Llama, error) {
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, err
 	}
@@ -50,8 +64,8 @@ func NewLlama(ctx context.Context, directory string) (*Llama, error) {
 	if err != nil {
 		return nil, err
 	}
-	engine := &Llama{runtime: runtime, chatName: chatModel, embedName: embedModel}
-	for _, specification := range modelSpecifications() {
+	engine := &Llama{runtime: runtime, chatName: chatName, embedName: embedModel}
+	for _, specification := range specifications {
 		modelFile, modelErr := runtime.GetModel(ctx, specification.name)
 		if modelErr == nil {
 			modelPath := filepath.Join(runtime.Store.Path(), modelFile.Path)
@@ -86,7 +100,7 @@ func NewLlama(ctx context.Context, directory string) (*Llama, error) {
 		}
 		log.Printf("startup: verified model %s", specification.name)
 	}
-	for _, name := range []string{chatModel, embedModel} {
+	for _, name := range loadNames {
 		log.Printf("startup: loading model %s", name)
 		if _, err := runtime.LoadModel(ctx, schema.LoadModelRequest{Name: name}); err != nil {
 			runtime.Close()
@@ -175,16 +189,12 @@ func (engine *Llama) Close() error {
 	return engine.runtime.Close()
 }
 
-func modelSpecifications() []struct {
-	name   string
-	url    string
-	sha256 string
-} {
-	return []struct {
-		name   string
-		url    string
-		sha256 string
-	}{{chatModel, chatURL, chatSHA256}, {embedModel, embedURL, embedSHA256}}
+func modelSpecifications() []modelSpecification {
+	return []modelSpecification{{chatModel, chatURL, chatSHA256}, embeddingModelSpecification()}
+}
+
+func embeddingModelSpecification() modelSpecification {
+	return modelSpecification{embedModel, embedURL, embedSHA256}
 }
 
 func decodePrompt(task *llama.Task, tokens []llamasys.Token, batchSize int) error {
