@@ -28,7 +28,6 @@ import (
 )
 
 const (
-	digestSpineCharacters  = 6500
 	minimumSpineCharacters = 500
 	defaultQueueCapacity   = 32
 )
@@ -313,7 +312,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		log.Printf("digest %s: skipped unchanged transcript source=%s", sessionID, payload.Source)
 		return nil
 	}
-	spine := digest.TranscriptSpine(transcript, digestSpineCharacters)
+	spine := digest.TranscriptSpine(transcript)
 	if len(spine) < minimumSpineCharacters {
 		log.Printf("digest %s: skipped extraction spine_characters=%d minimum=%d stored=0", sessionID, len(spine), minimumSpineCharacters)
 		if err := service.repository.DeleteSessionDocs(ctx, sessionID); err != nil {

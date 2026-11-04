@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"ragfy/internal/digest"
 	"ragfy/internal/knowledge"
 )
 
 type responseGenerator struct {
 	responses []string
+	prompts   []string
 	calls     int
 }
 
@@ -25,13 +27,53 @@ func (extractor *recordingExtractor) Extract(_ context.Context, request Request)
 	return []knowledge.Document{{Kind: request.Source}}, nil
 }
 
-func (generator *responseGenerator) Generate(context.Context, string) (string, error) {
+func (generator *responseGenerator) Generate(_ context.Context, prompt string) (string, error) {
 	if generator.calls >= len(generator.responses) {
 		return "", fmt.Errorf("unexpected generation call %d", generator.calls+1)
 	}
+	generator.prompts = append(generator.prompts, prompt)
 	response := generator.responses[generator.calls]
 	generator.calls++
 	return response, nil
+}
+
+func TestGenerativeConsolidatesOverlappingWindows(t *testing.T) {
+	evidence := "O código deve usar métodos atômicos e nomes significativos."
+	spine := strings.Join([]string{
+		"USER: Initial context for the architecture discussion.",
+		"CODEX: Prefer separate interfaces for replaceable implementations.",
+		"USER: De acordo. Pode seguir com essa arquitetura.",
+		"CODEX: More implementation context that makes this transcript longer.",
+		"USER: " + evidence,
+	}, "\n\n")
+
+	extractor := NewGenerative(nil)
+	extractor.windowCharacters = 125
+	extractor.overlapCharacters = 45
+	windows := digest.TranscriptWindows(spine, extractor.windowCharacters, extractor.overlapCharacters)
+	if len(windows) < 2 {
+		t.Fatalf("test spine did not produce multiple windows: %#v", windows)
+	}
+	empty := `{"problems":[],"facts":[],"preferences":[],"decisions":[]}`
+	final := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir métodos atômicos e nomes significativos.","why":"","applies_to":"código","evidence":%q,"acceptance":"explicit","acceptance_evidence":""}],"decisions":[]}`, evidence)
+	responses := make([]string, len(windows)+1)
+	for index := range windows {
+		responses[index] = empty
+	}
+	responses[len(responses)-1] = final
+	generator := &responseGenerator{responses: responses}
+	extractor.generator = generator
+
+	documents, err := extractor.Extract(context.Background(), Request{SessionID: "windowed", Source: "codex", Project: "ragfy", Spine: spine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generator.calls != len(windows)+1 || len(documents) != 1 || documents[0].Kind != "preference" {
+		t.Fatalf("calls=%d windows=%d documents=%#v", generator.calls, len(windows), documents)
+	}
+	if !strings.Contains(generator.prompts[len(generator.prompts)-1], "Consolidate candidate knowledge") {
+		t.Fatalf("last prompt was not consolidation: %s", generator.prompts[len(generator.prompts)-1])
+	}
 }
 
 func TestGenerativeRetriesInvalidResponse(t *testing.T) {
@@ -53,7 +95,7 @@ func TestGenerativeRetriesInvalidResponse(t *testing.T) {
 	}
 	for _, want := range []string{
 		"invalid structured response",
-		"extraction source=codex candidates=1 accepted=1 rejected=0",
+		"extraction source=codex windows=1 candidates=1 accepted=1 rejected=0",
 		"candidates_by_kind=fact:1 accepted_by_kind=fact:1 rejection_reasons=none",
 	} {
 		if !strings.Contains(logs.String(), want) {

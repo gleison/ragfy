@@ -38,7 +38,7 @@ On first startup, Ragfy downloads the fixed embedding GGUF model to the applicat
 
 - Qwen3-Embedding-0.6B Q8_0 for multilingual embeddings (about 639 MB).
 
-Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence.
+Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence. Extraction uses the full clean conversational spine by default. Oversized spines are split at message boundaries with overlap, then the candidates are consolidated and validated against the complete conversation.
 
 SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 

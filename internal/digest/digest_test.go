@@ -164,31 +164,37 @@ func TestPreferenceEvidenceCanComeFromLaterUserParagraph(t *testing.T) {
 	}
 }
 
-func TestParseRecordsRejectsUnrelatedPreferenceAndDuplicateEvidence(t *testing.T) {
+func TestParseRecordsAcceptsUserPreferenceAndRejectsDuplicateEvidence(t *testing.T) {
 	spine := "USER: The service reloads the model on every hook call.\n\nUSER: The extracted knowledge is not refined enough."
 	output := `{"problems":[{"problem":"The service reloads the model on every hook call.","context":"hooks","solution":"Keep one persistent local service running.","root_cause":"Each hook starts the model runtime again.","evidence":"The service reloads the model on every hook call."}],"facts":[],"preferences":[{"preference":"Use refined documentation conventions.","why":"","applies_to":"documentation","evidence":"The extracted knowledge is not refined enough."}],"decisions":[{"decision":"Keep one persistent local service running.","rejected":"Reload per hook","why":"Avoid repeated startup","evidence":"The service reloads the model on every hook call."}]}`
 	docs, err := ParseRecords(output, spine)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 1 || docs[0].Kind != "problem" {
-		t.Fatalf("expected only the first grounded record, got %#v", docs)
+	if len(docs) != 2 || docs[0].Kind != "problem" || docs[1].Kind != "preference" {
+		t.Fatalf("expected grounded problem and user preference, got %#v", docs)
 	}
 }
 
-func TestTranscriptSpineExcludesContaminatedExamplesAndBalancesLongText(t *testing.T) {
+func TestTranscriptSpineKeepsFullConversationAndExcludesInjectedContent(t *testing.T) {
 	data := []byte(strings.Join([]string{
 		`{"type":"event_msg","payload":{"type":"user_message","message":"Architecture at the beginning must remain visible."}}`,
 		`{"type":"event_msg","payload":{"type":"user_message","message":"durable self-contained state and standing instruction"}}`,
+		`{"type":"event_msg","payload":{"type":"user_message","message":"<environment_context>injected runtime data</environment_context>"}}`,
 		`{"type":"event_msg","payload":{"type":"user_message","message":"` + strings.Repeat("middle content ", 40) + `"}}`,
 		`{"type":"event_msg","payload":{"type":"user_message","message":"The final confirmed behavior must remain visible."}}`,
 	}, "\n"))
-	spine := TranscriptSpine(data, 300)
+	spine := TranscriptSpine(data)
 	if strings.Contains(spine, "durable self-contained state") {
 		t.Fatalf("contaminated example remained in spine: %s", spine)
 	}
-	if !strings.Contains(spine, "Architecture at the beginning") || !strings.Contains(spine, "final confirmed behavior") {
-		t.Fatalf("balanced excerpt lost beginning or end: %s", spine)
+	if strings.Contains(spine, "injected runtime data") {
+		t.Fatalf("injected environment context remained in spine: %s", spine)
+	}
+	for _, want := range []string{"Architecture at the beginning", "middle content", "final confirmed behavior"} {
+		if !strings.Contains(spine, want) {
+			t.Fatalf("full spine lost %q: %s", want, spine)
+		}
 	}
 }
 
@@ -201,7 +207,7 @@ func TestTranscriptSpineSupportsCodexAndClaudeMessageFormats(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"function_call","role":"assistant","content":"ignored call"}}`,
 		`not-json`,
 	}, "\n"))
-	spine := TranscriptSpine(data, 5000)
+	spine := TranscriptSpine(data)
 	for _, want := range []string{
 		"USER: Claude user message",
 		"CLAUDE: Claude assistant message",
@@ -214,6 +220,48 @@ func TestTranscriptSpineSupportsCodexAndClaudeMessageFormats(t *testing.T) {
 	}
 	if strings.Contains(spine, "ignored tool") || strings.Contains(spine, "ignored call") {
 		t.Fatalf("non-message content leaked into spine:\n%s", spine)
+	}
+}
+
+func TestTranscriptWindowsOverlapCompleteMessages(t *testing.T) {
+	spine := strings.Join([]string{
+		"USER: First message has context.",
+		"CODEX: Second message adds detail.",
+		"CODEX: Use modular Go interfaces.",
+		"USER: De acordo. Pode seguir.",
+		"CODEX: Final implementation notes.",
+	}, "\n\n")
+	windows := TranscriptWindows(spine, 105, 35)
+	if len(windows) < 2 {
+		t.Fatalf("expected multiple windows, got %#v", windows)
+	}
+	pair := "CODEX: Use modular Go interfaces.\n\nUSER: De acordo. Pode seguir."
+	foundPair := false
+	for _, window := range windows {
+		if strings.Contains(window, pair) {
+			foundPair = true
+		}
+		for _, block := range strings.Split(window, "\n\n") {
+			if !strings.HasPrefix(block, "USER: ") && !strings.HasPrefix(block, "CODEX: ") && !strings.HasPrefix(block, "CLAUDE: ") {
+				t.Fatalf("window split a message: %q", block)
+			}
+		}
+	}
+	if !foundPair {
+		t.Fatalf("proposal and acceptance were separated: %#v", windows)
+	}
+}
+
+func TestExplicitPreferenceAcceptsNaturalPortugueseWording(t *testing.T) {
+	evidence := "O código em si deve ser sua própria documentação, com métodos atômicos e nomes significativos."
+	spine := "USER: " + evidence
+	output := fmt.Sprintf(`{"problems":[],"facts":[],"preferences":[{"preference":"Preferir código autodocumentado com métodos atômicos e nomes significativos.","why":"","applies_to":"código Go","evidence":%q,"acceptance":"explicit","acceptance_evidence":""}],"decisions":[]}`, evidence)
+	documents, audit, err := ParseRecordsWithAudit(output, spine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].Kind != "preference" || audit.Rejected["preference_not_explicit"] != 0 {
+		t.Fatalf("documents=%#v audit=%s", documents, audit.Summary())
 	}
 }
 
