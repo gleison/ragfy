@@ -50,6 +50,8 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
+          BUILD_JOBS: "-j2"
+          RAGFY_PORTABLE: "1"
         run: ./scripts/build-ragfy.sh
 
       - name: Package artifact

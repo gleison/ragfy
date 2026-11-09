@@ -14,9 +14,19 @@ fi
 
 cd "$BUILD_TMP"
 build_pinned_llama_cpp_revision() {
+  local cmake_flags="-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF"
+  local -a build_arguments=(-o submodule -o go-tidy)
+
+  if [[ "${RAGFY_PORTABLE:-0}" == "1" ]]; then
+    cmake_flags+=" -DGGML_NATIVE=OFF"
+  fi
+  if [[ -n "${BUILD_JOBS:-}" ]]; then
+    build_arguments+=("BUILD_JOBS=$BUILD_JOBS")
+  fi
+  build_arguments+=("CMAKE_FLAGS=$cmake_flags" wrapper)
+
   git submodule update --init --recursive
-  make -o submodule -o go-tidy wrapper \
-    CMAKE_FLAGS="-DBUILD_SHARED_LIBS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF"
+  make "${build_arguments[@]}"
 }
 
 build_pinned_llama_cpp_revision
