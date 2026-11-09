@@ -120,3 +120,22 @@ func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 		t.Fatal("invalid JSON hook config was accepted")
 	}
 }
+
+func TestRemoveConfigRemovesOnlyRagfyHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	contents := `{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/usr/local/bin/unrelated"},{"type":"command","command":"\"/usr/local/bin/ragfy\" hook recall codex"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"\"/usr/local/bin/ragfy\" hook digest codex"}]}]}}`
+	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveConfig(path, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	root := readHookConfig(t, path)
+	commands := hookCommands(t, root, "UserPromptSubmit")
+	if len(commands) != 1 || commands[0]["command"] != "/usr/local/bin/unrelated" {
+		t.Fatalf("unexpected remaining hooks: %#v", root)
+	}
+	if len(hookCommands(t, root, "SessionEnd")) != 0 {
+		t.Fatalf("digest hook was not removed: %#v", root)
+	}
+}

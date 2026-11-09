@@ -10,13 +10,13 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
 	"time"
 
 	"ragfy/internal/chunking"
+	appconfig "ragfy/internal/config"
 	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/hook"
@@ -26,6 +26,7 @@ import (
 	"ragfy/internal/retrieval"
 	"ragfy/internal/service"
 	"ragfy/internal/settings"
+	setupflow "ragfy/internal/setup"
 	"ragfy/internal/storage/sqlite"
 )
 
@@ -64,16 +65,17 @@ func run(command string, arguments []string) error {
 	case "install":
 		return install()
 	case "uninstall":
-		return platform.UninstallService()
+		return setupflow.Uninstall()
 	case "status":
 		return platform.Status(settings.ListenAddress, os.Stdout)
 	case "setup-hooks":
 		return setupHooks()
 	case "setup":
-		if err := install(); err != nil {
+		executable, err := os.Executable()
+		if err != nil {
 			return err
 		}
-		return setupHooks()
+		return setupflow.Run(context.Background(), executable, os.Stdin, os.Stdout)
 	case "ingest":
 		return ingest(arguments[2:], os.Stdout)
 	case "help", "-h", "--help":
@@ -95,7 +97,7 @@ func ingest(arguments []string, output io.Writer) error {
 	return platform.RequestIngest(flags.Arg(0), *project, settings.ListenAddress, output)
 }
 
-func serve() error {
+func serve() (resultErr error) {
 	dataDirectory, err := prepareDataDirectory()
 	if err != nil {
 		return err
@@ -106,6 +108,15 @@ func serve() error {
 	}
 	defer logFile.Close()
 	log.SetOutput(logFile)
+	defer func() {
+		if resultErr != nil {
+			log.Printf("startup failed: %v", resultErr)
+		}
+	}()
+	configuration, err := appconfig.Load(filepath.Join(dataDirectory, "config.json"))
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	token, err := platform.LoadToken(filepath.Join(dataDirectory, "token"))
 	if err != nil {
 		return err
@@ -118,14 +129,14 @@ func serve() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	log.Println("initializing local embedding model; missing model files will be downloaded")
-	embedder, err := model.NewEmbeddingLlama(ctx, filepath.Join(dataDirectory, "models"))
+	embedder, err := model.NewEmbeddingLlamaWithConfig(ctx, filepath.Join(dataDirectory, "models"), configuration.Embedding)
 	if err != nil {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
 	defer embedder.Close()
 	log.Println("startup: validating embedding model and stored vectors")
-	if err := service.RefreshEmbeddings(ctx, repository, embedder, model.EmbeddingVersion); err != nil {
+	if err := service.RefreshEmbeddings(ctx, repository, embedder, configuration.Embedding.ModelVersion()); err != nil {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
@@ -141,22 +152,26 @@ func serve() error {
 	if err := os.WriteFile(reconciliationSchemaPath, []byte(reconciliation.JSONSchema+"\n"), 0600); err != nil {
 		return err
 	}
-	codexExecutable, err := findAgentExecutable("codex")
-	if err != nil {
-		return err
+	extractors := map[string]extraction.Extractor{}
+	reconcilers := map[string]reconciliation.Reconciler{}
+	if configuration.Enabled("codex") {
+		codexExecutable, executableErr := findAgentExecutable("codex")
+		if executableErr != nil {
+			return executableErr
+		}
+		extractors["codex"] = extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath))
+		reconcilers["codex"] = reconciliation.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, reconciliationSchemaPath))
 	}
-	claudeExecutable, err := findAgentExecutable("claude")
-	if err != nil {
-		return err
+	if configuration.Enabled("claude") {
+		claudeExecutable, executableErr := findAgentExecutable("claude")
+		if executableErr != nil {
+			return executableErr
+		}
+		extractors["claude"] = extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema))
+		reconcilers["claude"] = reconciliation.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, reconciliation.JSONSchema))
 	}
-	extractor := extraction.NewRouter(map[string]extraction.Extractor{
-		"codex":  extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath)),
-		"claude": extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema)),
-	})
-	reconciler := reconciliation.NewRouter(map[string]reconciliation.Reconciler{
-		"codex":  reconciliation.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, reconciliationSchemaPath)),
-		"claude": reconciliation.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, reconciliation.JSONSchema)),
-	})
+	extractor := extraction.NewRouter(extractors)
+	reconciler := reconciliation.NewRouter(reconcilers)
 	applicationService := service.New(service.Dependencies{
 		Repository: repository,
 		Embedder:   embedder,
@@ -182,18 +197,7 @@ func serve() error {
 }
 
 func findAgentExecutable(name string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err == nil {
-		candidate := filepath.Join(home, ".local", "bin", name)
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0111 != 0 {
-			return candidate, nil
-		}
-	}
-	path, err := exec.LookPath(name)
-	if err != nil {
-		return "", fmt.Errorf("%s executable not found: %w", name, err)
-	}
-	return path, nil
+	return platform.FindExecutable(name)
 }
 
 func prepareDataDirectory() (string, error) {
@@ -235,7 +239,15 @@ func setupHooks() error {
 	if err != nil {
 		return err
 	}
-	return hook.Setup(executable)
+	dataDirectory, err := platform.AppDataDir()
+	if err != nil {
+		return err
+	}
+	configuration, err := appconfig.Load(filepath.Join(dataDirectory, "config.json"))
+	if err != nil {
+		return err
+	}
+	return hook.Configure(executable, configuration.Integrations)
 }
 
 func usage() {

@@ -10,6 +10,10 @@ import (
 )
 
 func Setup(executable string) error {
+	return Configure(executable, []string{"claude", "codex"})
+}
+
+func Configure(executable string, enabled []string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -18,12 +22,73 @@ func Setup(executable string) error {
 		{filepath.Join(home, ".claude", "settings.json"), "claude"},
 		{filepath.Join(home, ".codex", "hooks.json"), "codex"},
 	} {
-		if err := MergeConfig(target.path, executable, target.source); err != nil {
-			return err
+		selected := false
+		for _, source := range enabled {
+			selected = selected || source == target.source
 		}
-		fmt.Println("Hooks atualizados:", target.path)
+		var configureErr error
+		if selected {
+			configureErr = MergeConfig(target.path, executable, target.source)
+		} else {
+			configureErr = RemoveConfig(target.path, target.source, executable)
+		}
+		if configureErr != nil {
+			return configureErr
+		}
+		if selected {
+			fmt.Println("Hooks updated:", target.path)
+		} else {
+			fmt.Println("Hooks removed:", target.path)
+		}
 	}
 	return nil
+}
+
+func RemoveAll() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	for _, target := range []struct{ path, source string }{
+		{filepath.Join(home, ".claude", "settings.json"), "claude"},
+		{filepath.Join(home, ".codex", "hooks.json"), "codex"},
+	} {
+		if err := RemoveConfig(target.path, target.source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func RemoveConfig(path, source string, executables ...string) error {
+	contents, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	backupPath := path + ".ragfy.bak"
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		_ = os.WriteFile(backupPath, contents, 0600)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(contents, &root); err != nil {
+		return fmt.Errorf("invalid hook config: %s", path)
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	if hooks == nil {
+		return nil
+	}
+	for _, executable := range executables {
+		removeExecutableHooks(hooks, executable)
+	}
+	removeRagfyHooks(hooks, source)
+	encoded, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(encoded, '\n'), 0600)
 }
 
 func MergeConfig(path, executable, source string) error {
@@ -37,6 +102,7 @@ func MergeConfig(path, executable, source string) error {
 		root["hooks"] = hooks
 	}
 	removeLegacyPythonRecallHooks(hooks)
+	removeRagfyHooks(hooks, source)
 	removeExecutableHooks(hooks, executable)
 	for event, action := range map[string]string{"UserPromptSubmit": "recall", "SessionEnd": "digest"} {
 		command := strconv.Quote(executable) + " hook " + action + " " + source
@@ -133,4 +199,45 @@ func removeExecutableHooks(hooks map[string]any, executable string) {
 		}
 		hooks[event] = keptEntries
 	}
+}
+
+func removeRagfyHooks(hooks map[string]any, source string) {
+	for _, event := range []string{"UserPromptSubmit", "SessionEnd"} {
+		entries, _ := hooks[event].([]any)
+		keptEntries := make([]any, 0, len(entries))
+		for _, rawEntry := range entries {
+			entry, ok := rawEntry.(map[string]any)
+			if !ok {
+				keptEntries = append(keptEntries, rawEntry)
+				continue
+			}
+			children, _ := entry["hooks"].([]any)
+			keptChildren := make([]any, 0, len(children))
+			for _, rawChild := range children {
+				child, _ := rawChild.(map[string]any)
+				command, _ := child["command"].(string)
+				if !isRagfyHookCommand(command, source) {
+					keptChildren = append(keptChildren, rawChild)
+				}
+			}
+			if len(keptChildren) > 0 {
+				entry["hooks"] = keptChildren
+				keptEntries = append(keptEntries, entry)
+			}
+		}
+		hooks[event] = keptEntries
+	}
+}
+
+func isRagfyHookCommand(command, source string) bool {
+	for _, action := range []string{"recall", "digest"} {
+		suffix := " hook " + action + " " + source
+		if !strings.HasSuffix(command, suffix) {
+			continue
+		}
+		executable := strings.TrimSpace(strings.TrimSuffix(command, suffix))
+		executable = strings.Trim(executable, `"`)
+		return strings.EqualFold(filepath.Base(executable), "ragfy")
+	}
+	return false
 }

@@ -46,3 +46,21 @@ func TestStartupProgressReportsActiveStartupButNotReadyService(t *testing.T) {
 		t.Fatalf("ready service reported progress = %q, %v", message, found)
 	}
 }
+
+func TestStartupFailureIgnoresFailuresFromBeforeCurrentStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "service.log")
+	old := time.Now().Add(-time.Hour).Format("2006/01/02 15:04:05")
+	if err := os.WriteFile(path, []byte(old+" startup failed: old failure\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if failure, found := StartupFailure(path, time.Now()); found || failure != "" {
+		t.Fatalf("old failure reported: %q, %v", failure, found)
+	}
+	now := time.Now().Format("2006/01/02 15:04:05")
+	if err := os.WriteFile(path, []byte(now+" startup failed: current failure\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if failure, found := StartupFailure(path, time.Now()); !found || !strings.Contains(failure, "current failure") {
+		t.Fatalf("current failure not reported: %q, %v", failure, found)
+	}
+}

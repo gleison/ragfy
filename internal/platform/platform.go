@@ -43,6 +43,21 @@ func AppDataDir() (string, error) {
 	return filepath.Join(base, "ragfy"), nil
 }
 
+func FindExecutable(name string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err == nil {
+		candidate := filepath.Join(home, ".local", "bin", name)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			return candidate, nil
+		}
+	}
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("%s executable not found: %w", name, err)
+	}
+	return path, nil
+}
+
 func LoadToken(path string) (string, error) {
 	if contents, err := os.ReadFile(path); err == nil {
 		return strings.TrimSpace(string(contents)), nil
@@ -82,6 +97,68 @@ func Status(listenAddress string, output io.Writer) error {
 	defer response.Body.Close()
 	_, err = io.Copy(output, response.Body)
 	return err
+}
+
+func WaitHealthy(ctx context.Context, listenAddress string, startedAt time.Time, output io.Writer) error {
+	dataDirectory, err := AppDataDir()
+	if err != nil {
+		return err
+	}
+	logPath := filepath.Join(dataDirectory, "logs", "service.log")
+	lastProgress := ""
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		token, tokenErr := os.ReadFile(filepath.Join(dataDirectory, "token"))
+		if tokenErr == nil {
+			request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listenAddress+"/health", nil)
+			request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+			response, requestErr := (&http.Client{Timeout: 2 * time.Second}).Do(request)
+			if requestErr == nil {
+				response.Body.Close()
+				if response.StatusCode/100 == 2 {
+					fmt.Fprintln(output, "✓ Ragfy service is healthy")
+					return nil
+				}
+			}
+		}
+		if failure, found := StartupFailure(logPath, startedAt); found {
+			return errors.New(failure)
+		}
+		if progress, found := StartupProgress(logPath); found && progress != lastProgress {
+			fmt.Fprintln(output, "  "+progress)
+			lastProgress = progress
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("service did not become healthy: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func StartupFailure(path string, startedAt time.Time) (string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	lines := strings.Split(string(data), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if strings.Contains(line, "startup failed:") {
+			if len(line) >= 19 {
+				stamp, stampErr := time.ParseInLocation("2006/01/02 15:04:05", line[:19], time.Local)
+				if stampErr == nil && stamp.Before(startedAt.Add(-time.Second)) {
+					return "", false
+				}
+			}
+			return line[strings.Index(line, "startup failed:"):], true
+		}
+		if strings.Contains(line, "startup: ready") {
+			return "", false
+		}
+	}
+	return "", false
 }
 
 func StartupProgress(path string) (string, bool) {
@@ -182,6 +259,7 @@ func InstallService(executable string) error {
 		}
 		path := filepath.Join(directory, "com.ragfy.service.plist")
 		contents := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>com.ragfy.service</string><key>ProgramArguments</key><array><string>%s</string><string>serve</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>`, executable)
+		_ = exec.Command("launchctl", "unload", path).Run()
 		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 			return err
 		}
@@ -198,9 +276,13 @@ func InstallService(executable string) error {
 		if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {
 			return err
 		}
-		return exec.Command("systemctl", "--user", "enable", "--now", "ragfy.service").Run()
+		if err := exec.Command("systemctl", "--user", "enable", "ragfy.service").Run(); err != nil {
+			return err
+		}
+		return exec.Command("systemctl", "--user", "restart", "ragfy.service").Run()
 	case "windows":
 		arguments := fmt.Sprintf(`"%s" serve`, executable)
+		_ = exec.Command("schtasks", "/End", "/TN", "RagfyService").Run()
 		if err := exec.Command("schtasks", "/Create", "/F", "/SC", "ONLOGON", "/TN", "RagfyService", "/TR", arguments).Run(); err != nil {
 			return err
 		}
@@ -219,7 +301,10 @@ func UninstallService() error {
 	case "darwin":
 		path := filepath.Join(home, "Library", "LaunchAgents", "com.ragfy.service.plist")
 		_ = exec.Command("launchctl", "unload", path).Run()
-		return os.Remove(path)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	case "linux":
 		_ = exec.Command("systemctl", "--user", "disable", "--now", "ragfy.service").Run()
 		_ = os.Remove(filepath.Join(home, ".config", "systemd", "user", "ragfy.service"))

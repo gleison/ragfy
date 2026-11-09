@@ -2,12 +2,10 @@ package model
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,16 +14,14 @@ import (
 	llama "github.com/mutablelogic/go-llama/pkg/llamacpp"
 	"github.com/mutablelogic/go-llama/pkg/llamacpp/schema"
 	llamasys "github.com/mutablelogic/go-llama/sys/llamacpp"
+
+	appconfig "ragfy/internal/config"
 )
 
 const (
 	chatModel         = "Qwen3-4B-Q4_K_M.gguf"
 	chatURL           = "hf://Qwen/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"
 	chatSHA256        = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
-	embedModel        = "Qwen3-Embedding-0.6B-Q8_0.gguf"
-	embedURL          = "hf://Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
-	embedSHA256       = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
-	EmbeddingVersion  = embedSHA256 + ":query-instruction-v1"
 	chatContextSize   = 4096
 	chatBatchSize     = 2048
 	chatOutputTokens  = 1200
@@ -34,20 +30,31 @@ const (
 )
 
 type Llama struct {
-	runtime   *llama.Llama
-	chatName  string
-	embedName string
+	runtime          *llama.Llama
+	chatName         string
+	embedName        string
+	embedSHA256      string
+	pooling          string
+	queryInstruction string
 }
 
 var _ Embedder = (*Llama)(nil)
 var _ Generator = (*Llama)(nil)
 
 func NewLlama(ctx context.Context, directory string) (*Llama, error) {
-	return newLlama(ctx, directory, modelSpecifications(), []string{chatModel, embedModel}, chatModel)
+	config := appconfig.DefaultEmbeddingConfig()
+	return newLlama(ctx, directory, modelSpecifications(config), []string{chatModel, config.Name()}, chatModel, config)
 }
 
 func NewEmbeddingLlama(ctx context.Context, directory string) (*Llama, error) {
-	return newLlama(ctx, directory, []modelSpecification{embeddingModelSpecification()}, []string{embedModel}, "")
+	return NewEmbeddingLlamaWithConfig(ctx, directory, appconfig.DefaultEmbeddingConfig())
+}
+
+func NewEmbeddingLlamaWithConfig(ctx context.Context, directory string, config appconfig.EmbeddingConfig) (*Llama, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return newLlama(ctx, directory, []modelSpecification{embeddingModelSpecification(config)}, []string{config.Name()}, "", config)
 }
 
 type modelSpecification struct {
@@ -56,7 +63,7 @@ type modelSpecification struct {
 	sha256 string
 }
 
-func newLlama(ctx context.Context, directory string, specifications []modelSpecification, loadNames []string, chatName string) (*Llama, error) {
+func newLlama(ctx context.Context, directory string, specifications []modelSpecification, loadNames []string, chatName string, embedConfig appconfig.EmbeddingConfig) (*Llama, error) {
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, err
 	}
@@ -64,7 +71,7 @@ func newLlama(ctx context.Context, directory string, specifications []modelSpeci
 	if err != nil {
 		return nil, err
 	}
-	engine := &Llama{runtime: runtime, chatName: chatName, embedName: embedModel}
+	engine := &Llama{runtime: runtime, chatName: chatName, embedName: embedConfig.Name(), pooling: embedConfig.Pooling, queryInstruction: embedConfig.QueryInstruction}
 	for _, specification := range specifications {
 		modelFile, modelErr := runtime.GetModel(ctx, specification.name)
 		if modelErr == nil {
@@ -98,6 +105,14 @@ func newLlama(ctx context.Context, directory string, specifications []modelSpeci
 			runtime.Close()
 			return nil, fmt.Errorf("modelo %s inválido: %w", specification.name, err)
 		}
+		actualSHA256, hashErr := fileSHA256(modelPath)
+		if hashErr != nil {
+			runtime.Close()
+			return nil, hashErr
+		}
+		if specification.name == embedConfig.Name() {
+			engine.embedSHA256 = actualSHA256
+		}
 		log.Printf("startup: verified model %s", specification.name)
 	}
 	for _, name := range loadNames {
@@ -126,8 +141,8 @@ func (engine *Llama) Embed(ctx context.Context, texts []string) ([][]float32, er
 		err := engine.runtime.WithContext(ctx, request, func(_ context.Context, task *llama.Task) error {
 			task.CachedModel().Lock()
 			defer task.CachedModel().Unlock()
-			if pooling := task.Context().PoolingType(); pooling != llamasys.PoolingLast {
-				return fmt.Errorf("embedding model pooling must be 'last', got %s", pooling)
+			if pooling := task.Context().PoolingType(); engine.pooling != "" && engine.pooling != "auto" && pooling.String() != engine.pooling {
+				return fmt.Errorf("embedding model pooling must be %q, got %s", engine.pooling, pooling)
 			}
 			options := llamasys.DefaultEmbeddingOptions()
 			options.Normalize = true
@@ -146,13 +161,47 @@ func (engine *Llama) Embed(ctx context.Context, texts []string) ([][]float32, er
 }
 
 func (engine *Llama) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
-	queryInput := "Instruct: Given a coding assistant prompt, retrieve relevant passages from the user's knowledge base that help answer the prompt.\nQuery: " + query
+	queryInput := engine.queryInstruction + query
 	vectors, err := engine.Embed(ctx, []string{queryInput})
 	if err != nil {
 		return nil, err
 	}
 	return vectors[0], nil
 }
+
+func (engine *Llama) ValidateEmbedding(ctx context.Context) error {
+	vectors, err := engine.Embed(ctx, []string{"Ragfy embedding validation.", "Semantic retrieval validation."})
+	if err != nil {
+		return err
+	}
+	if len(vectors) != 2 || len(vectors[0]) == 0 || len(vectors[0]) != len(vectors[1]) {
+		return errors.New("embedding model returned inconsistent vector dimensions")
+	}
+	different := false
+	for vectorIndex, vector := range vectors {
+		norm := 0.0
+		for _, value := range vector {
+			if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+				return errors.New("embedding model returned non-finite values")
+			}
+			norm += float64(value) * float64(value)
+		}
+		if norm == 0 {
+			return errors.New("embedding model returned a zero vector")
+		}
+		if vectorIndex == 1 {
+			for index := range vector {
+				different = different || vector[index] != vectors[0][index]
+			}
+		}
+	}
+	if !different {
+		return errors.New("embedding model returned identical vectors for different inputs")
+	}
+	return nil
+}
+
+func (engine *Llama) SHA256() string { return engine.embedSHA256 }
 
 func (engine *Llama) Generate(ctx context.Context, prompt string) (string, error) {
 	contextSize := uint32(chatContextSize)
@@ -189,12 +238,12 @@ func (engine *Llama) Close() error {
 	return engine.runtime.Close()
 }
 
-func modelSpecifications() []modelSpecification {
-	return []modelSpecification{{chatModel, chatURL, chatSHA256}, embeddingModelSpecification()}
+func modelSpecifications(config appconfig.EmbeddingConfig) []modelSpecification {
+	return []modelSpecification{{chatModel, chatURL, chatSHA256}, embeddingModelSpecification(config)}
 }
 
-func embeddingModelSpecification() modelSpecification {
-	return modelSpecification{embedModel, embedURL, embedSHA256}
+func embeddingModelSpecification(config appconfig.EmbeddingConfig) modelSpecification {
+	return modelSpecification{config.Name(), config.URI, config.SHA256}
 }
 
 func decodePrompt(task *llama.Task, tokens []llamasys.Token, batchSize int) error {
@@ -267,16 +316,14 @@ func tokenChunks(total, size int) [][2]int {
 }
 
 func verifyFile(path, expectedSHA256 string) error {
-	file, err := os.Open(path)
+	if expectedSHA256 == "" {
+		return nil
+	}
+	actualSHA256, err := fileSHA256(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return err
-	}
-	if actualSHA256 := hex.EncodeToString(hash.Sum(nil)); actualSHA256 != expectedSHA256 {
+	if actualSHA256 != expectedSHA256 {
 		return fmt.Errorf("SHA-256 mismatch: got %s", actualSHA256)
 	}
 	return nil
