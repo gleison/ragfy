@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"ragfy/internal/api"
 	"ragfy/internal/buildinfo"
 	"ragfy/internal/chunking"
 	appconfig "ragfy/internal/config"
@@ -63,6 +65,9 @@ func main() {
 }
 
 func run(command string, arguments []string) error {
+	if requestedCommandHelp(commandArguments(arguments)) && writeCommandHelp(os.Stdout, command) {
+		return nil
+	}
 	switch command {
 	case "serve":
 		return serve()
@@ -84,19 +89,27 @@ func run(command string, arguments []string) error {
 		if err := requireSetup(); err != nil {
 			return err
 		}
-		return ingest(arguments[2:], os.Stdout)
+		return ingest(commandArguments(arguments), os.Stdout)
+	case "search":
+		if err := requireSetup(); err != nil {
+			return err
+		}
+		return search(commandArguments(arguments), os.Stdout)
 	case "version", "--version":
 		fmt.Fprintf(os.Stdout, "ragfy %s (%s, %s)\n", buildinfo.DisplayVersion(), buildinfo.Commit, buildinfo.Date)
 		return nil
 	case "update":
 		return updater.Run(os.Stdin, os.Stdout, os.Stderr)
 	case "help", "-h", "--help":
-		usage()
-		return nil
+		return helpCommand(commandArguments(arguments), os.Stdout)
 	default:
-		usage()
+		writeGlobalHelp(os.Stdout)
 		return fmt.Errorf("%w: %s", errUnknownCommand, command)
 	}
+}
+
+func requestedCommandHelp(arguments []string) bool {
+	return len(arguments) == 1 && (arguments[0] == "--help" || arguments[0] == "-h")
 }
 
 func commandArguments(arguments []string) []string {
@@ -124,10 +137,33 @@ func ingest(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	project := flags.String("project", "", "limit ingested documents to a project")
-	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 {
-		return errors.New("usage: ragfy ingest [--project <name>] <folder>")
+	text := flags.String("text", "", "ingest text directly instead of files")
+	title := flags.String("title", "", "title for manually ingested text")
+	if err := flags.Parse(arguments); err != nil {
+		return errors.New("run `ragfy help ingest` for usage")
 	}
-	return platform.RequestIngest(flags.Arg(0), *project, settings.ListenAddress, output)
+	payload := api.IngestPayload{Project: *project, Text: *text, Title: *title}
+	if strings.TrimSpace(*text) != "" {
+		if flags.NArg() != 0 {
+			return errors.New("text ingest does not accept a path; run `ragfy help ingest`")
+		}
+	} else {
+		if flags.NArg() != 1 || strings.TrimSpace(*title) != "" {
+			return errors.New("provide one path or use --text; run `ragfy help ingest`")
+		}
+		payload.Path = flags.Arg(0)
+	}
+	return platform.RequestIngest(payload, settings.ListenAddress, output)
+}
+
+func search(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("search", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	project := flags.String("project", "", "include memories scoped to a project")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() == 0 {
+		return errors.New("provide a search phrase; run `ragfy help search`")
+	}
+	return platform.RequestSearch(strings.Join(flags.Args(), " "), *project, settings.ListenAddress, output)
 }
 
 func serve() (resultErr error) {
@@ -297,6 +333,94 @@ func requireSetup() error {
 	return err
 }
 
-func usage() {
-	fmt.Println("ragfy {setup|status [--verbose|--json]|update|ingest [--project <name>] <folder>|version|uninstall}")
+func helpCommand(arguments []string, output io.Writer) error {
+	if len(arguments) == 0 {
+		writeGlobalHelp(output)
+		return nil
+	}
+	if len(arguments) != 1 || !writeCommandHelp(output, arguments[0]) {
+		return fmt.Errorf("unknown help topic %q", strings.Join(arguments, " "))
+	}
+	return nil
+}
+
+func writeGlobalHelp(output io.Writer) {
+	fmt.Fprint(output, `Ragfy keeps a local knowledge base for Codex and Claude Code.
+
+Usage:
+  ragfy <command> [options]
+
+Commands:
+  setup       Configure the embedding model, integrations, hooks, and service
+  status      Check setup, service health, model cache, hooks, and knowledge
+  search      Find stored memories using a phrase
+  ingest      Index files or save text directly as memory
+  update      Install the latest published release
+  version     Print version and build information
+  uninstall   Remove the service and Ragfy hooks while preserving local data
+  help        Show this help or detailed help for one command
+
+Examples:
+  ragfy setup
+  ragfy status --verbose
+  ragfy search "How is authentication configured?"
+  ragfy ingest ~/Documents/Knowledge
+  ragfy ingest --text "Production uses PostgreSQL 17."
+
+Run 'ragfy help <command>' for command-specific options.
+`)
+}
+
+func writeCommandHelp(output io.Writer, command string) bool {
+	help := map[string]string{
+		"setup": `Usage: ragfy setup
+
+Run the interactive setup wizard. It validates the embedding model and selected
+clients, updates hooks, installs the background service, and waits for health.
+`,
+		"status": `Usage: ragfy status [--verbose] [--json]
+
+Show installation readiness and live service statistics.
+
+Options:
+  --verbose   Include executable, configuration, hook, cache, and endpoint paths
+  --json      Emit the complete report as JSON for automation
+`,
+		"search": `Usage: ragfy search [--project <name>] <phrase>
+
+Search active memories using the same hybrid semantic and lexical retrieval used
+by the prompt hook. Global memories are always searched; --project also includes
+memories scoped to that project.
+`,
+		"ingest": `Usage:
+  ragfy ingest [--project <name>] <path>
+  ragfy ingest [--project <name>] [--title <title>] --text <text>
+
+Index .md, .rst, and .txt files from a path, or store text directly. Ingest embeds
+content without running the generative session extraction used by digest hooks.
+`,
+		"update": `Usage: ragfy update
+
+Download the installer from the latest release and replace a direct installation
+in its current prefix. Homebrew installations must use 'brew upgrade ragfy'.
+`,
+		"version": `Usage: ragfy version
+
+Print the CLI version, commit, and build date.
+`,
+		"uninstall": `Usage: ragfy uninstall
+
+Remove service startup registration and Ragfy hooks. The database, downloaded
+models, configuration, and logs are preserved.
+`,
+		"help": `Usage: ragfy help [command]
+
+Show the command overview or detailed help for one command.
+`,
+	}
+	text, found := help[command]
+	if found {
+		fmt.Fprint(output, text)
+	}
+	return found
 }

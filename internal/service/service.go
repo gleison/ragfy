@@ -131,7 +131,7 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 		return
 	}
 	query := strings.TrimSpace(payload.Prompt)
-	if len(query) < 12 {
+	if len(query) < 12 && payload.Source != "cli" {
 		writeJSON(writer, map[string]string{})
 		return
 	}
@@ -144,7 +144,11 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 		writeJSON(writer, map[string]string{})
 		return
 	}
-	hits, err := service.retriever.Search(ctx, retrieval.Query{Text: query, Vector: queryVector, Limit: 4, Project: projectName(payload.CWD)})
+	project := strings.TrimSpace(payload.Project)
+	if project == "" {
+		project = projectName(payload.CWD)
+	}
+	hits, err := service.retriever.Search(ctx, retrieval.Query{Text: query, Vector: queryVector, Limit: 4, Project: project})
 	if err != nil {
 		log.Printf("recall search: %v", err)
 		writeJSON(writer, map[string]string{})
@@ -154,10 +158,10 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 	for index, hit := range hits {
 		fmt.Fprintf(&contextText, "[%d] %s\n%s\n\n", index+1, hit.Doc.Title, hit.Doc.Content)
 	}
-	if contextText.Len() > 0 {
+	if contextText.Len() > 0 && payload.Source != "cli" {
 		contextText.WriteString("\n---\nKB RECALL: Retrieved from your local knowledge base. Use only when relevant.")
 	}
-	writeJSON(writer, map[string]string{"context": contextText.String()})
+	writeJSON(writer, api.RecallResponse{Context: contextText.String()})
 }
 
 func (service *Service) handleDigest(writer http.ResponseWriter, request *http.Request) {
@@ -176,13 +180,25 @@ func (service *Service) handleDigest(writer http.ResponseWriter, request *http.R
 
 func (service *Service) handleIngest(writer http.ResponseWriter, request *http.Request) {
 	var payload api.IngestPayload
-	if json.NewDecoder(io.LimitReader(request.Body, 1<<20)).Decode(&payload) != nil || payload.Path == "" {
-		http.Error(writer, "path is required", http.StatusBadRequest)
+	if json.NewDecoder(io.LimitReader(request.Body, 1<<20)).Decode(&payload) != nil {
+		http.Error(writer, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	hasPath := strings.TrimSpace(payload.Path) != ""
+	hasText := strings.TrimSpace(payload.Text) != ""
+	if hasPath == hasText {
+		http.Error(writer, "provide either path or text", http.StatusBadRequest)
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Minute)
 	defer cancel()
-	documentCount, err := service.IngestPath(ctx, payload)
+	documentCount := 0
+	var err error
+	if hasText {
+		documentCount, err = service.IngestText(ctx, payload)
+	} else {
+		documentCount, err = service.IngestPath(ctx, payload)
+	}
 	if err != nil {
 		http.Error(writer, err.Error(), http.StatusInternalServerError)
 		return
@@ -238,6 +254,48 @@ func (service *Service) IngestPath(ctx context.Context, request api.IngestPayloa
 		return 0, err
 	}
 	return service.storeDocuments(ctx, documents)
+}
+
+func (service *Service) IngestText(ctx context.Context, request api.IngestPayload) (int, error) {
+	text := strings.TrimSpace(request.Text)
+	if text == "" {
+		return 0, errors.New("text is required")
+	}
+	project := strings.TrimSpace(request.Project)
+	title := strings.TrimSpace(request.Title)
+	if title == "" {
+		title = manualMemoryTitle(text)
+	}
+	identity := sha256.Sum256([]byte(project + "\x00" + title + "\x00" + text))
+	documents := make([]knowledge.Document, 0)
+	for index, chunk := range service.chunker.Split(text) {
+		document := knowledge.Document{
+			Source:   "manual",
+			SourceID: fmt.Sprintf("%x-%d", identity, index),
+			Title:    title,
+			Content:  chunk,
+			Kind:     "note",
+			Area:     "manual",
+			Scope:    knowledge.ScopeGlobal,
+			Metadata: map[string]any{"origin": "cli"},
+		}
+		if project != "" {
+			document.Scope = knowledge.ScopeProject
+			document.Project = project
+		}
+		documents = append(documents, document)
+	}
+	return service.storeDocuments(ctx, documents)
+}
+
+func manualMemoryTitle(text string) string {
+	firstLine, _, _ := strings.Cut(text, "\n")
+	firstLine = strings.TrimSpace(firstLine)
+	if utf8.RuneCountInString(firstLine) <= 80 {
+		return firstLine
+	}
+	runes := []rune(firstLine)
+	return strings.TrimSpace(string(runes[:77])) + "..."
 }
 
 func (service *Service) storeDocuments(ctx context.Context, documents []knowledge.Document) (int, error) {

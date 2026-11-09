@@ -54,9 +54,7 @@ func run(action, source, dataDirectory, listenAddress string, input io.Reader, o
 	if endpoint != "/recall" {
 		return
 	}
-	var result struct {
-		Context string `json:"context"`
-	}
+	var result api.RecallResponse
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) == nil {
 		_ = WritePromptOutput(output, result.Context)
 	}

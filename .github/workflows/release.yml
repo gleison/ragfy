@@ -84,4 +84,4 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" artifacts/* --verify-tag --generate-notes --title "Ragfy ${{ github.ref_name }}"
+        run: gh release create "${{ github.ref_name }}" artifacts/* install.sh --verify-tag --generate-notes --title "Ragfy ${{ github.ref_name }}"

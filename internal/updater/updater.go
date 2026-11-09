@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const InstallerURL = "https://raw.githubusercontent.com/gleison/ragfy/main/install.sh"
+const InstallerURL = "https://github.com/gleison/ragfy/releases/latest/download/install.sh"
 
 func Run(input io.Reader, output, errorOutput io.Writer) error {
 	executable, err := os.Executable()

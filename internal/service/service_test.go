@@ -193,6 +193,23 @@ func TestRecallUsesGlobalAndCurrentProjectKnowledge(t *testing.T) {
 	}
 }
 
+func TestCLISearchAcceptsShortQueriesWithoutHookFooter(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	if err := repo.Upsert(ctx, knowledge.Document{Source: "manual", SourceID: "cache", Title: "Go cache", Content: "Use a temporary GOCACHE in restricted environments.", Scope: knowledge.ScopeGlobal, Vector: []float32{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(repo, repo, &fakeModelEngine{}, 1)
+	response := requestJSON(t, service.Routes("secret"), http.MethodPost, "/recall", "secret", api.HookPayload{Source: "cli", Prompt: "Go cache"})
+	var body api.RecallResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.Context, "Go cache") || strings.Contains(body.Context, "KB RECALL") {
+		t.Fatalf("CLI recall context = %q", body.Context)
+	}
+}
+
 func TestDigestEndpointQueuesWithoutWaitingAndReportsFullQueue(t *testing.T) {
 	service := NewWithQueueCapacity(Dependencies{}, 1)
 	handler := service.Routes("secret")
@@ -622,6 +639,28 @@ func TestIngestPathCanRestrictDocumentsToProject(t *testing.T) {
 	}
 	if len(documents) != 1 || documents[0].Scope != knowledge.ScopeProject || documents[0].Project != "ragfy" {
 		t.Fatalf("documents=%#v", documents)
+	}
+}
+
+func TestIngestTextStoresManualProjectMemory(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	service := newTestService(repo, repo, &fakeModelEngine{}, defaultQueueCapacity)
+	payload := api.IngestPayload{Text: "Production uses PostgreSQL 17.", Title: "Production database", Project: " ragfy "}
+	count, err := service.IngestText(ctx, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || len(documents) != 1 {
+		t.Fatalf("count=%d documents=%#v", count, documents)
+	}
+	document := documents[0]
+	if document.Source != "manual" || document.Title != "Production database" || document.Content != payload.Text || document.Scope != knowledge.ScopeProject || document.Project != "ragfy" {
+		t.Fatalf("manual document = %#v", document)
 	}
 }
 

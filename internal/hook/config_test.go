@@ -144,14 +144,37 @@ func TestInspectConfigurationReportsBothHooks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, ".codex", "hooks.json")
-	if err := MergeConfig(path, "/usr/local/bin/ragfy", "codex"); err != nil {
+	executable := filepath.Join(home, "bin", "ragfy")
+	if err := os.MkdirAll(filepath.Dir(executable), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("binary"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeConfig(path, executable, "codex"); err != nil {
 		t.Fatal(err)
 	}
 	state, err := InspectConfiguration("codex")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.PromptRecall || !state.SessionDigest || state.Path != path {
+	if !state.PromptRecall || !state.SessionDigest || !state.ExecutableOK || state.Executable != executable || state.Path != path {
 		t.Fatalf("configuration state = %#v", state)
+	}
+	if err := os.Remove(executable); err != nil {
+		t.Fatal(err)
+	}
+	state, err = InspectConfiguration("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ExecutableOK {
+		t.Fatalf("missing hook executable reported healthy: %#v", state)
+	}
+}
+
+func TestConfigureRejectsMissingExecutable(t *testing.T) {
+	if err := Configure(filepath.Join(t.TempDir(), "missing-ragfy"), []string{"codex"}); err == nil {
+		t.Fatal("missing hook executable was accepted")
 	}
 }

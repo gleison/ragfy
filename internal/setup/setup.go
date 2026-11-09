@@ -64,7 +64,11 @@ func Run(ctx context.Context, executable string, input io.Reader, output io.Writ
 	fmt.Fprintln(output, "Waiting for the Ragfy service…")
 	waitContext, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	return platform.WaitHealthy(waitContext, settings.ListenAddress, serviceStartedAt, output)
+	if err := platform.WaitHealthy(waitContext, settings.ListenAddress, serviceStartedAt, output); err != nil {
+		return err
+	}
+	fmt.Fprintln(output, "Restart active Codex or Claude Code sessions so they reload the updated hook commands.")
+	return nil
 }
 
 func Uninstall() error {

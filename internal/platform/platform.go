@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"ragfy/internal/api"
 )
 
 func AppDataDir() (string, error) {
@@ -252,33 +254,63 @@ func StartupProgress(path string) (string, bool) {
 	return "", false
 }
 
-func RequestIngest(path, project, listenAddress string, output io.Writer) error {
-	dataDirectory, err := AppDataDir()
+func RequestIngest(payload api.IngestPayload, listenAddress string, output io.Writer) error {
+	responseBody, err := requestService("ingest", payload, listenAddress, 30*time.Minute)
 	if err != nil {
 		return err
-	}
-	token, err := os.ReadFile(filepath.Join(dataDirectory, "token"))
-	if err != nil {
-		return errors.New("service is not installed; run ragfy setup")
-	}
-	body, _ := json.Marshal(map[string]string{"path": path, "project": project})
-	request, err := http.NewRequest(http.MethodPost, "http://"+listenAddress+"/ingest", strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	request.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 30 * time.Minute}).Do(request)
-	if err != nil {
-		return errors.New("service is not running; run `ragfy setup`")
-	}
-	defer response.Body.Close()
-	responseBody, _ := io.ReadAll(response.Body)
-	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("ingest failed: %s", strings.TrimSpace(string(responseBody)))
 	}
 	fmt.Fprintln(output, string(responseBody))
 	return nil
+}
+
+func RequestSearch(query, project, listenAddress string, output io.Writer) error {
+	workingDirectory, _ := os.Getwd()
+	payload := api.HookPayload{Source: "cli", Prompt: query, Project: project, CWD: workingDirectory}
+	responseBody, err := requestService("recall", payload, listenAddress, 45*time.Second)
+	if err != nil {
+		return err
+	}
+	var response api.RecallResponse
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return fmt.Errorf("decode recall response: %w", err)
+	}
+	if strings.TrimSpace(response.Context) == "" {
+		fmt.Fprintln(output, "No matching memories found.")
+		return nil
+	}
+	fmt.Fprint(output, response.Context)
+	return nil
+}
+
+func requestService(action string, payload any, listenAddress string, timeout time.Duration) ([]byte, error) {
+	dataDirectory, err := AppDataDir()
+	if err != nil {
+		return nil, err
+	}
+	token, err := os.ReadFile(filepath.Join(dataDirectory, "token"))
+	if err != nil {
+		return nil, errors.New("service is not installed; run ragfy setup")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequest(http.MethodPost, "http://"+listenAddress+"/"+action, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: timeout}).Do(request)
+	if err != nil {
+		return nil, errors.New("service is not running; run `ragfy setup`")
+	}
+	defer response.Body.Close()
+	responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("%s failed: %s", action, strings.TrimSpace(string(responseBody)))
+	}
+	return responseBody, nil
 }
 
 func InstallService(executable string) error {

@@ -13,13 +13,13 @@ A local knowledge base for Claude Code and Codex. A Go service keeps the embeddi
 The installer detects macOS or Linux and the current CPU architecture, downloads the matching release, verifies its SHA-256 checksum, and installs Ragfy atomically in `/usr/local/bin`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gleison/ragfy/main/install.sh | sh
+curl -fsSL https://github.com/gleison/ragfy/releases/latest/download/install.sh | sh
 ```
 
 The final step starts the interactive setup wizard. Use `--user` to install in `~/.local/bin` without elevated permissions, or `--prefix` to choose another location:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gleison/ragfy/main/install.sh | sh -s -- --user
+curl -fsSL https://github.com/gleison/ragfy/releases/latest/download/install.sh | sh -s -- --user
 ```
 
 After setup, running `ragfy` with no arguments shows the current installation status. Operational commands detect a missing setup and point to `ragfy setup` instead of partially configuring the application.
@@ -43,8 +43,10 @@ ragfy status
 ragfy status --verbose
 ragfy status --json
 ragfy update
+ragfy search "How is authentication configured?"
 ragfy ingest ~/Documents/Knowledge
 ragfy ingest --project ragfy ./docs
+ragfy ingest --text "Production uses PostgreSQL 17."
 ```
 
 `setup` is an interactive wizard. It suggests the default embedding model, lets you enter another GGUF model URI, and lets you select Codex, Claude Code, or both. It validates the selected CLI and embedding model, saves the configuration, reconciles the selected hooks, registers a user-level service (LaunchAgent on macOS, systemd on Linux, or a logon task on Windows), and waits until the service reports healthy. The service listens only on `127.0.0.1` and protects its API with a local token.
@@ -53,9 +55,11 @@ ragfy ingest --project ragfy ./docs
 
 `update` downloads the current installer over HTTPS and asks it to replace a direct installation in the same prefix. Homebrew-managed installations are left to `brew upgrade ragfy`.
 
+`search` runs the same hybrid semantic and lexical search used by the prompt hook and prints the matching active memories. Global memories are always searched; pass `--project <name>` to also search memories scoped to a project.
+
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 
-`ingest` indexes `.md`, `.rst`, and `.txt` files as global knowledge by default. Pass `--project <name>` to restrict the indexed documents to that project. Document ingest chunks and embeds files locally; it does not run the session knowledge extractor. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
+`ingest` indexes `.md`, `.rst`, and `.txt` files as global knowledge by default. It can also store a phrase or note directly with `--text`, optionally using `--title`. Pass `--project <name>` to restrict ingested knowledge to that project. Ingest chunks and embeds content locally; unlike the `SessionEnd` digest hook, it does not run generative extraction over a conversation transcript. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
 
 ## Models and local data
 

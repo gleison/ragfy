@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,9 @@ func Setup(executable string) error {
 }
 
 func Configure(executable string, enabled []string) error {
+	if err := validateExecutable(executable); err != nil {
+		return err
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
@@ -64,6 +68,8 @@ type ConfigurationState struct {
 	Path          string `json:"path"`
 	PromptRecall  bool   `json:"prompt_recall"`
 	SessionDigest bool   `json:"session_digest"`
+	Executable    string `json:"executable,omitempty"`
+	ExecutableOK  bool   `json:"executable_ok"`
 }
 
 func InspectConfiguration(source string) (ConfigurationState, error) {
@@ -93,12 +99,18 @@ func InspectConfiguration(source string) (ConfigurationState, error) {
 		return state, fmt.Errorf("invalid hook config: %s", path)
 	}
 	hooks, _ := root["hooks"].(map[string]any)
-	state.PromptRecall = eventHasRagfyHook(hooks, "UserPromptSubmit", "recall", source)
-	state.SessionDigest = eventHasRagfyHook(hooks, "SessionEnd", "digest", source)
+	promptExecutable, promptFound := eventRagfyExecutable(hooks, "UserPromptSubmit", "recall", source)
+	digestExecutable, digestFound := eventRagfyExecutable(hooks, "SessionEnd", "digest", source)
+	state.PromptRecall = promptFound
+	state.SessionDigest = digestFound
+	if promptFound && digestFound && promptExecutable == digestExecutable {
+		state.Executable = promptExecutable
+		state.ExecutableOK = validateExecutable(promptExecutable) == nil
+	}
 	return state, nil
 }
 
-func eventHasRagfyHook(hooks map[string]any, event, action, source string) bool {
+func eventRagfyExecutable(hooks map[string]any, event, action, source string) (string, bool) {
 	entries, _ := hooks[event].([]any)
 	for _, rawEntry := range entries {
 		entry, _ := rawEntry.(map[string]any)
@@ -106,12 +118,25 @@ func eventHasRagfyHook(hooks map[string]any, event, action, source string) bool 
 		for _, rawChild := range children {
 			child, _ := rawChild.(map[string]any)
 			command, _ := child["command"].(string)
-			if strings.HasSuffix(command, " hook "+action+" "+source) && isRagfyHookCommand(command, source) {
-				return true
+			suffix := " hook " + action + " " + source
+			if strings.HasSuffix(command, suffix) && isRagfyHookCommand(command, source) {
+				executable := strings.TrimSpace(strings.TrimSuffix(command, suffix))
+				return strings.Trim(executable, `"`), true
 			}
 		}
 	}
-	return false
+	return "", false
+}
+
+func validateExecutable(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("hook executable %q is unavailable: %w", path, err)
+	}
+	if info.IsDir() || runtime.GOOS != "windows" && info.Mode()&0111 == 0 {
+		return fmt.Errorf("hook executable %q is not executable", path)
+	}
+	return nil
 }
 
 func RemoveConfig(path, source string, executables ...string) error {

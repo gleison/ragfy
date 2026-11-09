@@ -19,13 +19,16 @@ import (
 )
 
 type Integration struct {
-	Name          string `json:"name"`
-	Selected      bool   `json:"selected"`
-	Executable    string `json:"executable,omitempty"`
-	ExecutableOK  bool   `json:"executable_ok"`
-	PromptRecall  bool   `json:"prompt_recall"`
-	SessionDigest bool   `json:"session_digest"`
-	Error         string `json:"error,omitempty"`
+	Name             string `json:"name"`
+	Selected         bool   `json:"selected"`
+	Executable       string `json:"executable,omitempty"`
+	HookPath         string `json:"hook_path,omitempty"`
+	HookExecutable   string `json:"hook_executable,omitempty"`
+	ExecutableOK     bool   `json:"executable_ok"`
+	HookExecutableOK bool   `json:"hook_executable_ok"`
+	PromptRecall     bool   `json:"prompt_recall"`
+	SessionDigest    bool   `json:"session_digest"`
+	Error            string `json:"error,omitempty"`
 }
 
 type Model struct {
@@ -48,27 +51,34 @@ type Health struct {
 }
 
 type Report struct {
-	Version       string                `json:"version"`
-	Binary        string                `json:"binary"`
-	DataDirectory string                `json:"data_directory"`
-	Configured    bool                  `json:"configured"`
-	ConfigError   string                `json:"config_error,omitempty"`
-	Service       platform.ServiceState `json:"service"`
-	Healthy       bool                  `json:"healthy"`
-	Ready         bool                  `json:"ready"`
-	Health        Health                `json:"health"`
-	ServiceError  string                `json:"service_error,omitempty"`
-	Startup       string                `json:"startup,omitempty"`
-	Model         Model                 `json:"model"`
-	Integrations  []Integration         `json:"integrations"`
+	Version        string                `json:"version"`
+	Binary         string                `json:"binary"`
+	DataDirectory  string                `json:"data_directory"`
+	ConfigPath     string                `json:"config_path"`
+	ServiceAddress string                `json:"service_address"`
+	Configured     bool                  `json:"configured"`
+	ConfigError    string                `json:"config_error,omitempty"`
+	Service        platform.ServiceState `json:"service"`
+	Healthy        bool                  `json:"healthy"`
+	Ready          bool                  `json:"ready"`
+	Health         Health                `json:"health"`
+	ServiceError   string                `json:"service_error,omitempty"`
+	Startup        string                `json:"startup,omitempty"`
+	Model          Model                 `json:"model"`
+	Integrations   []Integration         `json:"integrations"`
 }
 
 func Inspect(ctx context.Context, version, listenAddress string) Report {
-	report := Report{Version: version, Integrations: []Integration{}}
+	report := Report{Version: version, ServiceAddress: listenAddress, Integrations: []Integration{}}
 	report.Binary, _ = os.Executable()
 	report.DataDirectory, _ = platform.AppDataDir()
-	report.Service, _ = platform.InspectService()
-	configuration, err := appconfig.LoadRequired(filepath.Join(report.DataDirectory, "config.json"))
+	report.ConfigPath = filepath.Join(report.DataDirectory, "config.json")
+	serviceState, serviceErr := platform.InspectService()
+	report.Service = serviceState
+	if serviceErr != nil {
+		report.ServiceError = serviceErr.Error()
+	}
+	configuration, err := appconfig.LoadRequired(report.ConfigPath)
 	if err != nil {
 		if !errors.Is(err, appconfig.ErrNotConfigured) {
 			report.ConfigError = err.Error()
@@ -87,10 +97,18 @@ func Inspect(ctx context.Context, version, listenAddress string) Report {
 				integration.Error = executableErr.Error()
 			}
 			if hooks, hookErr := hook.InspectConfiguration(name); hookErr == nil {
+				integration.HookPath = hooks.Path
+				integration.HookExecutable = hooks.Executable
+				integration.HookExecutableOK = hooks.ExecutableOK
 				integration.PromptRecall = hooks.PromptRecall
 				integration.SessionDigest = hooks.SessionDigest
-				if integration.Error == "" && (!hooks.PromptRecall || !hooks.SessionDigest) {
-					integration.Error = "Ragfy hooks are missing; run `ragfy setup`"
+				if integration.Error == "" {
+					switch {
+					case !hooks.PromptRecall || !hooks.SessionDigest:
+						integration.Error = "Ragfy hooks are missing; run `ragfy setup`"
+					case !hooks.ExecutableOK:
+						integration.Error = "The hook executable is unavailable; run `ragfy setup` and restart active client sessions"
+					}
 				}
 			} else if integration.Error == "" {
 				integration.Error = hookErr.Error()
@@ -108,7 +126,7 @@ func ready(report Report) bool {
 		return false
 	}
 	for _, integration := range report.Integrations {
-		if integration.Selected && (!integration.ExecutableOK || !integration.PromptRecall || !integration.SessionDigest) {
+		if integration.Selected && (!integration.ExecutableOK || !integration.HookExecutableOK || !integration.PromptRecall || !integration.SessionDigest) {
 			return false
 		}
 	}
@@ -171,9 +189,10 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 			fmt.Fprintln(writer, "    "+report.ConfigError)
 		}
 	}
-	if verbose || report.Configured {
+	if verbose {
 		fmt.Fprintln(writer, "  Binary    "+report.Binary)
 		fmt.Fprintln(writer, "  Data      "+report.DataDirectory)
+		fmt.Fprintln(writer, "  Config    "+report.ConfigPath)
 	}
 	if !report.Configured {
 		fmt.Fprintln(writer, "\nRun `ragfy setup` to get started.")
@@ -209,6 +228,11 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 	} else if verbose && report.ServiceError != "" {
 		fmt.Fprintln(writer, "  Error     "+report.ServiceError)
 	}
+	if verbose {
+		fmt.Fprintln(writer, "  Endpoint  http://"+report.ServiceAddress)
+		fmt.Fprintf(writer, "  Registered %t\n", report.Service.Registered)
+		fmt.Fprintf(writer, "  Process    running=%t pid=%s\n", report.Service.Running, valueOrDash(report.Service.PID))
+	}
 
 	fmt.Fprintln(writer, "\nEmbedding")
 	if report.Model.Cached {
@@ -231,13 +255,18 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 			fmt.Fprintf(writer, "  ○ %-11s not selected\n", label)
 			continue
 		}
-		if integration.ExecutableOK && integration.PromptRecall && integration.SessionDigest {
+		if integration.ExecutableOK && integration.HookExecutableOK && integration.PromptRecall && integration.SessionDigest {
 			fmt.Fprintf(writer, "  ✓ %-11s executable found, hooks configured\n", label)
 		} else {
 			fmt.Fprintf(writer, "  ✗ %-11s configuration incomplete\n", label)
 			if integration.Error != "" {
 				fmt.Fprintln(writer, "    "+integration.Error)
 			}
+		}
+		if verbose && integration.Selected {
+			fmt.Fprintln(writer, "    Executable "+valueOrDash(integration.Executable))
+			fmt.Fprintln(writer, "    Hook file  "+valueOrDash(integration.HookPath))
+			fmt.Fprintln(writer, "    Hook binary "+valueOrDash(integration.HookExecutable))
 		}
 	}
 
@@ -255,6 +284,13 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 		fmt.Fprintln(writer, "\nRun `ragfy setup` to repair the configuration.")
 	}
 	return nil
+}
+
+func valueOrDash(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func formatBytes(size int64) string {
