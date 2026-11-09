@@ -8,27 +8,50 @@
 
 A local knowledge base for Claude Code and Codex. A Go service keeps the embedding model loaded; hooks make short calls to the service to retrieve context before a prompt and digest the session when it ends. Session extraction runs through the same agent provider that created the transcript.
 
-## Build
+## Install
 
-Requirements: Go 1.25+, Git, CMake, a C/C++ compiler, `pkg-config`, and authenticated Codex and Claude Code CLIs. The local embedding runtime uses `llama.cpp` through the `go-llama` Go binding.
+The installer detects macOS or Linux and the current CPU architecture, downloads the matching release, verifies its SHA-256 checksum, and installs Ragfy atomically in `/usr/local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gleison/ragfy/main/install.sh | sh
+```
+
+The final step starts the interactive setup wizard. Use `--user` to install in `~/.local/bin` without elevated permissions, or `--prefix` to choose another location:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gleison/ragfy/main/install.sh | sh -s -- --user
+```
+
+After setup, running `ragfy` with no arguments shows the current installation status. Operational commands detect a missing setup and point to `ragfy setup` instead of partially configuring the application.
+
+## Build from source
+
+Requirements: Go 1.25+, Git, CMake, a C/C++ compiler, `pkg-config`, and at least one authenticated Codex or Claude Code CLI. The local embedding runtime uses `llama.cpp` through the `go-llama` Go binding.
 
 ```sh
 ./scripts/build-ragfy.sh
 ./scripts/install-ragfy.sh
 ```
 
-The build script compiles the native runtime for the current operating system and architecture. The install script replaces the executable atomically and reloads an existing user service; this matters on macOS, where overwriting a binary used by a LaunchAgent can make the kernel reject it with `OS_REASON_CODESIGNING`. Set `RAGFY_BIN_DIR` to install somewhere other than `~/.local/bin`, and add the selected directory to your `PATH`. On Windows, the native build still requires manual CMake, compiler, and pkg-config setup.
+The build script compiles the native runtime for the current operating system and architecture and embeds the Git version, commit, and build date. The developer install script replaces the executable atomically and reloads an existing user service; this matters on macOS, where overwriting a binary used by a LaunchAgent can make the kernel reject it with `OS_REASON_CODESIGNING`. Set `RAGFY_BIN_DIR` to choose a development install location. On Windows, the native build still requires manual CMake, compiler, and pkg-config setup.
 
-## Install and use
+## Setup and use
 
 ```sh
 ragfy setup
 ragfy status
+ragfy status --verbose
+ragfy status --json
+ragfy update
 ragfy ingest ~/Documents/Knowledge
 ragfy ingest --project ragfy ./docs
 ```
 
 `setup` is an interactive wizard. It suggests the default embedding model, lets you enter another GGUF model URI, and lets you select Codex, Claude Code, or both. It validates the selected CLI and embedding model, saves the configuration, reconciles the selected hooks, registers a user-level service (LaunchAgent on macOS, systemd on Linux, or a logon task on Windows), and waits until the service reports healthy. The service listens only on `127.0.0.1` and protects its API with a local token.
+
+`status` combines local installation checks with live service information. It reports the binary and data paths, service registration and health, model cache, selected integrations and hooks, queue depth, active and superseded knowledge, digested sessions, and project count. `--json` provides the same report for automation.
+
+`update` downloads the current installer over HTTPS and asks it to replace a direct installation in the same prefix. Homebrew-managed installations are left to `brew upgrade ragfy`.
 
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 

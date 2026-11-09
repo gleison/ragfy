@@ -145,7 +145,7 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 		t.Fatalf("unauthorized health status = %d", got.Code)
 	}
 	health := requestJSON(t, handler, http.MethodGet, "/health", "secret", nil)
-	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"ok":true`) {
+	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"ok":true`) || !strings.Contains(health.Body.String(), `"knowledge"`) {
 		t.Fatalf("health response = %d %s", health.Code, health.Body.String())
 	}
 

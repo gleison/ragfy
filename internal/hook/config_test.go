@@ -139,3 +139,19 @@ func TestRemoveConfigRemovesOnlyRagfyHooks(t *testing.T) {
 		t.Fatalf("digest hook was not removed: %#v", root)
 	}
 }
+
+func TestInspectConfigurationReportsBothHooks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".codex", "hooks.json")
+	if err := MergeConfig(path, "/usr/local/bin/ragfy", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := InspectConfiguration("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.PromptRecall || !state.SessionDigest || state.Path != path {
+		t.Fatalf("configuration state = %#v", state)
+	}
+}

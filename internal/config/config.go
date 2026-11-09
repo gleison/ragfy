@@ -22,6 +22,8 @@ const (
 	DefaultQueryInstruction = "Instruct: Given a coding assistant prompt, retrieve relevant passages from the user's knowledge base that help answer the prompt.\nQuery: "
 )
 
+var ErrNotConfigured = errors.New("Ragfy has not been configured; run `ragfy setup` to get started")
+
 type EmbeddingConfig struct {
 	URI              string `json:"uri"`
 	SHA256           string `json:"sha256,omitempty"`
@@ -102,6 +104,15 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return result, nil
+}
+
+func LoadRequired(path string) (Config, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return Config{}, ErrNotConfigured
+	} else if err != nil {
+		return Config{}, err
+	}
+	return Load(path)
 }
 
 func Save(path string, value Config) error {

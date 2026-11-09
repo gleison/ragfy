@@ -44,6 +44,14 @@ type Service struct {
 	chunker    chunking.Chunker
 	queue      chan api.HookPayload
 	digestLock sync.Mutex
+	startedAt  time.Time
+	runtime    RuntimeInfo
+}
+
+type RuntimeInfo struct {
+	Version string
+	Model   string
+	Pooling string
 }
 
 type Dependencies struct {
@@ -53,6 +61,7 @@ type Dependencies struct {
 	Retriever  retrieval.Retriever
 	Reconciler reconciliation.Reconciler
 	Chunker    chunking.Chunker
+	Runtime    RuntimeInfo
 }
 
 func New(dependencies Dependencies) *Service {
@@ -72,13 +81,27 @@ func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service
 		reconciler: reconciler,
 		chunker:    dependencies.Chunker,
 		queue:      make(chan api.HookPayload, queueCapacity),
+		startedAt:  time.Now(),
+		runtime:    dependencies.Runtime,
 	}
 }
 
 func (service *Service) Routes(token string) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", authenticate(token, func(writer http.ResponseWriter, _ *http.Request) {
-		writeJSON(writer, map[string]any{"ok": true, "queued": len(service.queue)})
+	mux.HandleFunc("GET /health", authenticate(token, func(writer http.ResponseWriter, request *http.Request) {
+		statistics, err := service.repository.Statistics(request.Context())
+		if err != nil {
+			log.Printf("health statistics: %v", err)
+		}
+		writeJSON(writer, map[string]any{
+			"ok":         true,
+			"queued":     len(service.queue),
+			"started_at": service.startedAt.UTC().Format(time.RFC3339),
+			"version":    service.runtime.Version,
+			"model":      service.runtime.Model,
+			"pooling":    service.runtime.Pooling,
+			"knowledge":  statistics,
+		})
 	}))
 	mux.HandleFunc("POST /recall", authenticate(token, service.handleRecall))
 	mux.HandleFunc("POST /digest", authenticate(token, service.handleDigest))

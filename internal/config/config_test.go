@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -21,6 +22,13 @@ func TestSaveAndLoadCustomConfiguration(t *testing.T) {
 	}
 	if loaded.Embedding.URI != configuration.Embedding.URI || !loaded.Enabled("codex") || loaded.Enabled("claude") {
 		t.Fatalf("loaded configuration = %#v", loaded)
+	}
+}
+
+func TestLoadRequiredDistinguishesMissingSetup(t *testing.T) {
+	_, err := LoadRequired(filepath.Join(t.TempDir(), "config.json"))
+	if !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("LoadRequired error = %v", err)
 	}
 }
 

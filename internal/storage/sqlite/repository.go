@@ -65,6 +65,17 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value`, model)
 	return err
 }
 
+func (repository *Repository) Statistics(ctx context.Context) (knowledge.Statistics, error) {
+	var statistics knowledge.Statistics
+	err := repository.database.QueryRowContext(ctx, `SELECT
+COUNT(*) FILTER (WHERE status='active'),
+COUNT(*) FILTER (WHERE status='superseded'),
+(SELECT COUNT(*) FROM digested_sessions),
+COUNT(DISTINCT CASE WHEN scope='project' THEN project END)
+FROM docs`).Scan(&statistics.ActiveRecords, &statistics.SupersededRecords, &statistics.DigestedSessions, &statistics.Projects)
+	return statistics, err
+}
+
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
 	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason FROM docs ORDER BY id`)
 	if err != nil {

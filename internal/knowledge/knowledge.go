@@ -60,6 +60,13 @@ type SessionCommit struct {
 	Supersessions  []Supersession
 }
 
+type Statistics struct {
+	ActiveRecords     int `json:"active_records"`
+	SupersededRecords int `json:"superseded_records"`
+	DigestedSessions  int `json:"digested_sessions"`
+	Projects          int `json:"projects"`
+}
+
 type Repository interface {
 	Upsert(context.Context, Document) error
 	EmbeddingModel(context.Context) (string, error)
@@ -68,4 +75,5 @@ type Repository interface {
 	UpdateEmbedding(context.Context, string, string, []float32) error
 	HasSession(context.Context, string, string) (bool, error)
 	CommitSession(context.Context, SessionCommit) error
+	Statistics(context.Context) (Statistics, error)
 }

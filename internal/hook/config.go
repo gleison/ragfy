@@ -60,6 +60,60 @@ func RemoveAll() error {
 	return nil
 }
 
+type ConfigurationState struct {
+	Path          string `json:"path"`
+	PromptRecall  bool   `json:"prompt_recall"`
+	SessionDigest bool   `json:"session_digest"`
+}
+
+func InspectConfiguration(source string) (ConfigurationState, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ConfigurationState{}, err
+	}
+	path := ""
+	switch source {
+	case "claude":
+		path = filepath.Join(home, ".claude", "settings.json")
+	case "codex":
+		path = filepath.Join(home, ".codex", "hooks.json")
+	default:
+		return ConfigurationState{}, fmt.Errorf("unknown hook source %q", source)
+	}
+	state := ConfigurationState{Path: path}
+	contents, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return state, nil
+	}
+	if err != nil {
+		return state, err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(contents, &root); err != nil {
+		return state, fmt.Errorf("invalid hook config: %s", path)
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	state.PromptRecall = eventHasRagfyHook(hooks, "UserPromptSubmit", "recall", source)
+	state.SessionDigest = eventHasRagfyHook(hooks, "SessionEnd", "digest", source)
+	return state, nil
+}
+
+func eventHasRagfyHook(hooks map[string]any, event, action, source string) bool {
+	entries, _ := hooks[event].([]any)
+	for _, rawEntry := range entries {
+		entry, _ := rawEntry.(map[string]any)
+		children, _ := entry["hooks"].([]any)
+		for _, rawChild := range children {
+			child, _ := rawChild.(map[string]any)
+			command, _ := child["command"].(string)
+			if strings.HasSuffix(command, " hook "+action+" "+source) && isRagfyHookCommand(command, source) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func RemoveConfig(path, source string, executables ...string) error {
 	contents, err := os.ReadFile(path)
 	if os.IsNotExist(err) {

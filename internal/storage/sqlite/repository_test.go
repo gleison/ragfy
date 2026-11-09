@@ -54,6 +54,30 @@ func openTestRepository(t *testing.T) *Repository {
 	return repo
 }
 
+func TestRepositoryStatistics(t *testing.T) {
+	repository := openTestRepository(t)
+	ctx := context.Background()
+	documents := []knowledge.Document{
+		{Source: "manual", SourceID: "active", Content: "active", Scope: knowledge.ScopeGlobal, Status: knowledge.StatusActive},
+		{Source: "manual", SourceID: "old", Content: "old", Scope: knowledge.ScopeProject, Project: "ragfy", Status: knowledge.StatusSuperseded},
+	}
+	for _, document := range documents {
+		if err := repository.Upsert(ctx, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: "session", TranscriptHash: "hash"}); err != nil {
+		t.Fatal(err)
+	}
+	statistics, err := repository.Statistics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statistics.ActiveRecords != 1 || statistics.SupersededRecords != 1 || statistics.DigestedSessions != 1 || statistics.Projects != 1 {
+		t.Fatalf("statistics = %#v", statistics)
+	}
+}
+
 func TestSQLiteRepositoryRoundTripSearchAndModelVersion(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)

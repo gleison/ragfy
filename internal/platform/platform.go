@@ -58,6 +58,67 @@ func FindExecutable(name string) (string, error) {
 	return path, nil
 }
 
+type ServiceState struct {
+	Registered bool   `json:"registered"`
+	Running    bool   `json:"running"`
+	PID        string `json:"pid,omitempty"`
+}
+
+func InspectService() (ServiceState, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ServiceState{}, err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		path := filepath.Join(home, "Library", "LaunchAgents", "com.ragfy.service.plist")
+		state := ServiceState{}
+		if _, err := os.Stat(path); err == nil {
+			state.Registered = true
+		} else if !os.IsNotExist(err) {
+			return state, err
+		}
+		output, commandErr := exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/com.ragfy.service", os.Getuid())).CombinedOutput()
+		if commandErr != nil {
+			return state, nil
+		}
+		for _, line := range strings.Split(string(output), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "state = running" {
+				state.Running = true
+			}
+			if strings.HasPrefix(line, "pid = ") {
+				state.PID = strings.TrimSpace(strings.TrimPrefix(line, "pid = "))
+			}
+		}
+		return state, nil
+	case "linux":
+		path := filepath.Join(home, ".config", "systemd", "user", "ragfy.service")
+		state := ServiceState{}
+		if _, err := os.Stat(path); err == nil {
+			state.Registered = true
+		} else if !os.IsNotExist(err) {
+			return state, err
+		}
+		state.Running = exec.Command("systemctl", "--user", "is-active", "--quiet", "ragfy.service").Run() == nil
+		if state.Running {
+			if output, err := exec.Command("systemctl", "--user", "show", "--property", "MainPID", "--value", "ragfy.service").Output(); err == nil {
+				state.PID = strings.TrimSpace(string(output))
+			}
+		}
+		return state, nil
+	case "windows":
+		output, commandErr := exec.Command("schtasks", "/Query", "/TN", "RagfyService", "/FO", "LIST").CombinedOutput()
+		if commandErr != nil {
+			return ServiceState{}, nil
+		}
+		text := strings.ToLower(string(output))
+		return ServiceState{Registered: true, Running: strings.Contains(text, "running")}, nil
+	default:
+		return ServiceState{}, fmt.Errorf("unsupported OS: %s", runtime.GOOS)
+	}
+}
+
 func LoadToken(path string) (string, error) {
 	if contents, err := os.ReadFile(path); err == nil {
 		return strings.TrimSpace(string(contents)), nil
@@ -71,32 +132,6 @@ func LoadToken(path string) (string, error) {
 		return "", err
 	}
 	return token, nil
-}
-
-func Status(listenAddress string, output io.Writer) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	dataDirectory, err := AppDataDir()
-	if err != nil {
-		return err
-	}
-	token, err := os.ReadFile(filepath.Join(dataDirectory, "token"))
-	if err != nil {
-		return errors.New("daemon not configured; run ragfy install")
-	}
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listenAddress+"/health", nil)
-	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		if progress, found := StartupProgress(filepath.Join(dataDirectory, "logs", "service.log")); found {
-			fmt.Fprintln(output, progress)
-			return nil
-		}
-		return errors.New("daemon is not running")
-	}
-	defer response.Body.Close()
-	_, err = io.Copy(output, response.Body)
-	return err
 }
 
 func WaitHealthy(ctx context.Context, listenAddress string, startedAt time.Time, output io.Writer) error {
@@ -235,7 +270,7 @@ func RequestIngest(path, project, listenAddress string, output io.Writer) error 
 	request.Header.Set("Content-Type", "application/json")
 	response, err := (&http.Client{Timeout: 30 * time.Minute}).Do(request)
 	if err != nil {
-		return errors.New("daemon is not running; run ragfy install")
+		return errors.New("service is not running; run `ragfy setup`")
 	}
 	defer response.Body.Close()
 	responseBody, _ := io.ReadAll(response.Body)
