@@ -15,22 +15,24 @@
 - [ ] Implementar `ragfy sessions show <session-id>` com conhecimentos, origem e estado.
 - [ ] Implementar `ragfy sessions forget <session-id>` de forma transacional.
 - [ ] Ao esquecer uma sessão, reativar com segurança registros que tenham sido superseded por conhecimentos removidos.
-- [ ] Implementar busca direta pelo CLI usando o mesmo caminho de recuperação do hook.
+- [x] Implementar busca direta pelo CLI usando o mesmo caminho de recuperação do hook (`ragfy search`).
 - [ ] Registrar os resultados efetivamente injetados por recall, associados à sessão e ao prompt.
 - [ ] Criar uma forma de marcar resultados como úteis ou irrelevantes.
 - [ ] Criar um comando de explicação do recall com candidatos, cortes e pontuações.
 
 ## Integridade da ingestão
 
-- [ ] Evitar re-embedding de arquivos e chunks cujo conteúdo não mudou.
-- [ ] Remover chunks antigos quando um arquivo encolher, for alterado ou desaparecer da raiz ingerida.
-- [ ] Preservar no documento a data do arquivo em vez da data da execução da ingestão.
-- [ ] Testar atualização, remoção e re-chunking de documentos.
+- [x] Evitar extração e re-embedding de fontes cujo conteúdo não mudou.
+- [x] Preservar versões de uma fonte alterada e aposentar os conhecimentos derivados da versão anterior, inclusive quando o arquivo encolher.
+- [ ] Detectar arquivos que desapareceram de uma raiz ingerida e aposentar seus conhecimentos derivados.
+- [x] Preservar no documento a data do arquivo em vez da data da execução da ingestão.
+- [x] Testar idempotência, versionamento da fonte e aposentadoria transacional dos conhecimentos anteriores.
+- [ ] Testar o ciclo de arquivos especificamente: alteração, remoção da raiz e mudança dos conhecimentos extraídos.
 
 ## Cobertura adicional
 
 - [ ] Avaliar e implementar recall no `SubagentStart`.
-- [ ] Avaliar `ragfy remember` para inclusão manual de conhecimento.
+- [x] Disponibilizar inclusão manual de conhecimento pelo pipeline normal (`ragfy ingest --text`).
 - [ ] Avaliar conectores para PDF e Obsidian antes de YouTube.
 - [ ] Avaliar configuração de raízes e atualização agendada.
 - [ ] Medir prompts longos antes de portar segmentação ou reescrita de consultas.
