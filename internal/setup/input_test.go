@@ -8,10 +8,10 @@ import (
 	appconfig "ragfy/internal/config"
 )
 
-func TestWizardAcceptsCustomModelAndCodexOnly(t *testing.T) {
+func TestSetupAcceptsCustomModelAndCodexOnly(t *testing.T) {
 	input := strings.NewReader("https://example.com/embedding.gguf\n1\n")
 	var output bytes.Buffer
-	result, err := NewWizard(input, &output).Ask(appconfig.Default())
+	result, err := askConfiguration(input, &output, appconfig.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,12 +22,12 @@ func TestWizardAcceptsCustomModelAndCodexOnly(t *testing.T) {
 		t.Fatalf("integrations = %#v", result.Integrations)
 	}
 	if !strings.Contains(output.String(), "[x] 1. Codex") || !strings.Contains(output.String(), "[x] 2. Claude Code") {
-		t.Fatalf("wizard did not render checkboxes: %q", output.String())
+		t.Fatalf("setup did not render checkboxes: %q", output.String())
 	}
 }
 
-func TestWizardKeepsDefaultsOnBlankInput(t *testing.T) {
-	result, err := NewWizard(strings.NewReader("\n\n"), &bytes.Buffer{}).Ask(appconfig.Default())
+func TestSetupKeepsDefaultsOnBlankInput(t *testing.T) {
+	result, err := askConfiguration(strings.NewReader("\n\n"), &bytes.Buffer{}, appconfig.Default())
 	if err != nil {
 		t.Fatal(err)
 	}

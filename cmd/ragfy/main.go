@@ -79,14 +79,8 @@ func run(command string, arguments []string) error {
 		return setupflow.Uninstall()
 	case "status":
 		return statusCommand(commandArguments(arguments), os.Stdout)
-	case "setup-hooks":
-		return setupHooks()
 	case "setup":
-		executable, err := os.Executable()
-		if err != nil {
-			return err
-		}
-		return setupflow.Run(context.Background(), executable, os.Stdin, os.Stdout)
+		return setupCommand(commandArguments(arguments), os.Stdout)
 	case "ingest":
 		if err := requireSetup(); err != nil {
 			return err
@@ -118,6 +112,27 @@ func run(command string, arguments []string) error {
 		writeGlobalHelp(os.Stdout)
 		return fmt.Errorf("%w: %s", errUnknownCommand, command)
 	}
+}
+
+func setupCommand(arguments []string, output io.Writer) error {
+	if len(arguments) > 0 && arguments[0] == "hooks" {
+		if len(arguments) == 2 && (arguments[1] == "--help" || arguments[1] == "-h") {
+			writeCommandHelp(output, "setup hooks")
+			return nil
+		}
+		if len(arguments) != 1 {
+			return errors.New("usage: ragfy setup hooks")
+		}
+		return setupHooks()
+	}
+	if len(arguments) != 0 {
+		return errors.New("usage: ragfy setup [hooks]")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return setupflow.Run(context.Background(), executable, os.Stdin, output)
 }
 
 func requestedCommandHelp(arguments []string) bool {
@@ -167,9 +182,17 @@ func ingest(arguments []string, output io.Writer) error {
 		if flags.NArg() != 1 || strings.TrimSpace(*title) != "" {
 			return errors.New("provide one path or use --text; run `ragfy help ingest`")
 		}
-		payload.Path = flags.Arg(0)
+		absolutePath, err := resolveIngestPath(flags.Arg(0))
+		if err != nil {
+			return fmt.Errorf("resolve ingest path: %w", err)
+		}
+		payload.Path = absolutePath
 	}
 	return platform.RequestIngest(payload, settings.ListenAddress, output)
+}
+
+func resolveIngestPath(path string) (string, error) {
+	return filepath.Abs(path)
 }
 
 func search(arguments []string, output io.Writer) error {
@@ -351,15 +374,11 @@ func writeRecallShow(output io.Writer, event knowledge.RecallEvent) {
 		if result.Status != "selected" {
 			continue
 		}
-		rank := result.SelectedRank
-		if rank == 0 {
-			rank = result.Rank
-		}
 		feedback := result.Feedback
 		if feedback == "" {
 			feedback = "unrated"
 		}
-		fmt.Fprintf(output, "\n[%d] %s\nfeedback=%s\n%s\n", rank, result.Title, feedback, result.Content)
+		fmt.Fprintf(output, "\n[candidate %d, injected %d] %s\nfeedback=%s\n%s\n", result.Rank, result.SelectedRank, result.Title, feedback, result.Content)
 	}
 }
 
@@ -583,7 +602,8 @@ func helpCommand(arguments []string, output io.Writer) error {
 		writeGlobalHelp(output)
 		return nil
 	}
-	if len(arguments) != 1 || !writeCommandHelp(output, arguments[0]) {
+	topic := strings.Join(arguments, " ")
+	if !writeCommandHelp(output, topic) {
 		return fmt.Errorf("unknown help topic %q", strings.Join(arguments, " "))
 	}
 	return nil
@@ -596,7 +616,7 @@ Usage:
   ragfy <command> [options]
 
 Commands:
-  setup       Configure the embedding model, integrations, hooks, and service
+  setup       Configure Ragfy or reapply the saved client hooks
   status      Check setup, service health, model cache, hooks, and knowledge
   search      Find stored memories using a phrase
   sessions    List, inspect, or forget digested sessions
@@ -609,6 +629,7 @@ Commands:
 
 Examples:
   ragfy setup
+  ragfy setup hooks
   ragfy status --verbose
   ragfy search "How is authentication configured?"
   ragfy ingest ~/Documents/Knowledge
@@ -620,10 +641,14 @@ Run 'ragfy help <command>' for command-specific options.
 
 func writeCommandHelp(output io.Writer, command string) bool {
 	help := map[string]string{
-		"setup": `Usage: ragfy setup
+		"setup": `Usage:
+  ragfy setup
+  ragfy setup hooks
 
-Run the interactive setup wizard. It validates the embedding model and selected
+Run interactive setup. It validates the embedding model and selected
 clients, updates hooks, installs the background service, and waits for health.
+Use 'ragfy setup hooks' to reapply the saved integration selection without
+running interactive setup again.
 `,
 		"status": `Usage: ragfy status [--verbose] [--json]
 
@@ -633,11 +658,16 @@ Options:
   --verbose   Include executable, configuration, hook, cache, and endpoint paths
   --json      Emit the complete report as JSON for automation
 `,
+		"setup hooks": `Usage: ragfy setup hooks
+
+Reapply the saved integration selection. Ragfy hooks are added for selected
+clients and removed from deselected clients; unrelated hooks are preserved.
+`,
 		"search": `Usage: ragfy search [--project <name>] <phrase>
 
 Search active memories using the same hybrid semantic and lexical retrieval used
-by the prompt hook. Global memories are always searched; --project also includes
-memories scoped to that project.
+by the prompt hook. Global memories and memories for the current directory name
+are searched by default; --project overrides that project name.
 `,
 		"sessions": `Usage:
   ragfy sessions list [--json]
@@ -656,7 +686,8 @@ records that were superseded by knowledge from the forgotten session.
 
 Review prompt recalls recorded by hooks, explain selected, already-present,
 eligible, and cut candidates with their ranking scores, and mark an injected
-result as useful or irrelevant.
+result as useful or irrelevant. Use the candidate rank shown by show or explain
+when submitting feedback.
 `,
 		"ingest": `Usage:
   ragfy ingest [--project <name>] [--provider codex|claude] <path>
@@ -664,9 +695,12 @@ result as useful or irrelevant.
 
 Extract durable knowledge from .md, .rst, and .txt files or text supplied directly,
 then validate, reconcile, and embed it using the same pipeline as session digest.
-The normalized source is preserved for traceability and safe reprocessing. The
-only configured provider is selected automatically. If both are configured,
-Codex is preferred; use --provider to choose explicitly.
+Directories are traversed recursively; empty and unsupported files, and files
+larger than 40 MiB, are skipped. The normalized source is preserved for
+traceability and safe reprocessing. Provider selection is automatic when only one
+is configured. If both are configured, Codex is preferred; use --provider to
+choose explicitly. A stable --title makes later text with the same provider and
+project a new version of the same manual source.
 `,
 		"update": `Usage: ragfy update
 

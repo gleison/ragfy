@@ -9,20 +9,12 @@ import (
 	appconfig "ragfy/internal/config"
 )
 
-type Wizard struct {
-	input  *bufio.Reader
-	output io.Writer
-}
-
-func NewWizard(input io.Reader, output io.Writer) *Wizard {
-	return &Wizard{input: bufio.NewReader(input), output: output}
-}
-
-func (wizard *Wizard) Ask(current appconfig.Config) (appconfig.Config, error) {
-	fmt.Fprintln(wizard.output, "Ragfy setup")
-	fmt.Fprintln(wizard.output, "")
-	fmt.Fprintf(wizard.output, "Embedding model URI [%s]: ", current.Embedding.URI)
-	uri, err := wizard.readLine()
+func askConfiguration(input io.Reader, output io.Writer, current appconfig.Config) (appconfig.Config, error) {
+	reader := bufio.NewReader(input)
+	fmt.Fprintln(output, "Ragfy setup")
+	fmt.Fprintln(output)
+	fmt.Fprintf(output, "Embedding model URI [%s]: ", current.Embedding.URI)
+	uri, err := readLine(reader)
 	if err != nil {
 		return appconfig.Config{}, err
 	}
@@ -41,11 +33,11 @@ func (wizard *Wizard) Ask(current appconfig.Config) (appconfig.Config, error) {
 		return appconfig.Config{}, err
 	}
 
-	fmt.Fprintln(wizard.output, "\nIntegrations (enter a comma-separated selection):")
-	fmt.Fprintf(wizard.output, "  [%s] 1. Codex\n", checkbox(current.Enabled("codex")))
-	fmt.Fprintf(wizard.output, "  [%s] 2. Claude Code\n", checkbox(current.Enabled("claude")))
-	fmt.Fprintf(wizard.output, "Selection [%s]: ", selectionLabel(current.Integrations))
-	selection, err := wizard.readLine()
+	fmt.Fprintln(output, "\nIntegrations (enter a comma-separated selection):")
+	fmt.Fprintf(output, "  [%s] 1. Codex\n", checkbox(current.Enabled("codex")))
+	fmt.Fprintf(output, "  [%s] 2. Claude Code\n", checkbox(current.Enabled("claude")))
+	fmt.Fprintf(output, "Selection [%s]: ", selectionLabel(current.Integrations))
+	selection, err := readLine(reader)
 	if err != nil {
 		return appconfig.Config{}, err
 	}
@@ -60,8 +52,8 @@ func (wizard *Wizard) Ask(current appconfig.Config) (appconfig.Config, error) {
 	return result, result.Validate()
 }
 
-func (wizard *Wizard) readLine() (string, error) {
-	line, err := wizard.input.ReadString('\n')
+func readLine(reader *bufio.Reader) (string, error) {
+	line, err := reader.ReadString('\n')
 	if err == io.EOF {
 		return strings.TrimSpace(line), nil
 	}

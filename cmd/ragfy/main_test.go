@@ -2,11 +2,34 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"ragfy/internal/knowledge"
 )
+
+func TestResolveIngestPathUsesCallerWorkingDirectory(t *testing.T) {
+	workingDirectory := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveIngestPath("docs")
+	if err != nil || resolved != filepath.Join(current, "docs") {
+		t.Fatalf("resolved path = %q, %v", resolved, err)
+	}
+}
 
 func TestCommandArgumentsHandlesDefaultStatusInvocation(t *testing.T) {
 	if arguments := commandArguments([]string{"ragfy"}); len(arguments) != 0 {
@@ -27,7 +50,7 @@ func TestHelpDescribesSearchAndTextIngest(t *testing.T) {
 		}
 	}
 	var ingest bytes.Buffer
-	if !writeCommandHelp(&ingest, "ingest") || !strings.Contains(ingest.String(), "--text") || !strings.Contains(ingest.String(), "same pipeline as session digest") || !strings.Contains(ingest.String(), "only configured provider is selected automatically") {
+	if !writeCommandHelp(&ingest, "ingest") || !strings.Contains(ingest.String(), "--text") || !strings.Contains(ingest.String(), "same pipeline as session digest") || !strings.Contains(ingest.String(), "Provider selection is automatic") {
 		t.Fatalf("ingest help = %q", ingest.String())
 	}
 }
@@ -44,6 +67,32 @@ func TestHelpDescribesSessionAndRecallAudit(t *testing.T) {
 	}
 	if !writeCommandHelp(&recalls, "recalls") || !strings.Contains(recalls.String(), "ranking scores") {
 		t.Fatalf("recalls help = %q", recalls.String())
+	}
+}
+
+func TestHelpDescribesSetupHooksAndSearchProjectDefault(t *testing.T) {
+	var global, setupHooks, search bytes.Buffer
+	writeGlobalHelp(&global)
+	if !strings.Contains(global.String(), "ragfy setup hooks") {
+		t.Fatalf("global help = %q", global.String())
+	}
+	if !writeCommandHelp(&setupHooks, "setup hooks") || !strings.Contains(setupHooks.String(), "unrelated hooks are preserved") {
+		t.Fatalf("setup hooks help = %q", setupHooks.String())
+	}
+	if !writeCommandHelp(&search, "search") || !strings.Contains(search.String(), "current directory name") || !strings.Contains(search.String(), "overrides") {
+		t.Fatalf("search help = %q", search.String())
+	}
+}
+
+func TestSetupHooksHelpUsesNestedCommandWithoutApplyingHooks(t *testing.T) {
+	for _, invoke := range []func(*bytes.Buffer) error{
+		func(output *bytes.Buffer) error { return setupCommand([]string{"hooks", "--help"}, output) },
+		func(output *bytes.Buffer) error { return helpCommand([]string{"setup", "hooks"}, output) },
+	} {
+		var output bytes.Buffer
+		if err := invoke(&output); err != nil || !strings.Contains(output.String(), "Usage: ragfy setup hooks") {
+			t.Fatalf("setup hooks help = %q, %v", output.String(), err)
+		}
 	}
 }
 
@@ -70,12 +119,12 @@ func TestRecallShowFocusesOnInjectedMemoriesWhileExplainShowsAuditDetails(t *tes
 		LexicalCutoff:  0.5,
 		Results: []knowledge.RecallResult{
 			{
-				Rank: 1, SelectedRank: 1, Status: "selected", Feedback: "useful",
+				Rank: 3, SelectedRank: 1, Status: "selected", Feedback: "useful",
 				SourceID: "selected-id", Title: "Selected memory", Content: "selected content", Kind: "fact",
 				Score: 0.9, SemanticScore: 0.8, LexicalScore: 0.7, ProjectBoost: 0.1,
 			},
 			{
-				Rank: 2, Status: "cutoff", SourceID: "cut-id", Title: "Cut candidate", Content: "cut content", Kind: "decision",
+				Rank: 4, Status: "cutoff", SourceID: "cut-id", Title: "Cut candidate", Content: "cut content", Kind: "decision",
 				Score: 0.4, SemanticScore: 0.3, LexicalScore: 0.2,
 			},
 		},
@@ -83,7 +132,7 @@ func TestRecallShowFocusesOnInjectedMemoriesWhileExplainShowsAuditDetails(t *tes
 
 	var show bytes.Buffer
 	writeRecallShow(&show, event)
-	for _, expected := range []string{"Injected memories:", "[1] Selected memory", "feedback=useful", "selected content"} {
+	for _, expected := range []string{"Injected memories:", "[candidate 3, injected 1] Selected memory", "feedback=useful", "selected content"} {
 		if !strings.Contains(show.String(), expected) {
 			t.Fatalf("show missing %q: %s", expected, show.String())
 		}

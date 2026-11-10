@@ -128,7 +128,7 @@ esac
 if [ "$RUN_SETUP" -eq 0 ]; then
   echo "Update complete."
 elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
-  printf "Run the setup wizard now? [Y/n] " > /dev/tty
+  printf "Run setup now? [Y/n] " > /dev/tty
   read answer < /dev/tty
   case "$answer" in
     n|N|no|NO) echo "Run '$TARGET setup' when you are ready." ;;

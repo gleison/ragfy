@@ -25,7 +25,7 @@ func Run(ctx context.Context, executable string, input io.Reader, output io.Writ
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
-	selected, err := NewWizard(input, output).Ask(current)
+	selected, err := askConfiguration(input, output, current)
 	if err != nil {
 		return err
 	}
