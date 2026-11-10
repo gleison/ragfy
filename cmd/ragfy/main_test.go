@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"ragfy/internal/knowledge"
 )
 
 func TestCommandArgumentsHandlesDefaultStatusInvocation(t *testing.T) {
@@ -50,6 +52,60 @@ func TestJSONCommandArgumentsAcceptsFlagBeforeOrAfterIdentifier(t *testing.T) {
 		remaining, asJSON, err := jsonCommandArguments(arguments)
 		if err != nil || !asJSON || len(remaining) != 1 || remaining[0] != "session" {
 			t.Fatalf("arguments=%#v remaining=%#v json=%v err=%v", arguments, remaining, asJSON, err)
+		}
+	}
+}
+
+func TestRecallShowFocusesOnInjectedMemoriesWhileExplainShowsAuditDetails(t *testing.T) {
+	event := knowledge.RecallEvent{
+		ID:             "recall-1",
+		SessionID:      "session-1",
+		Source:         "codex",
+		Project:        "ragfy",
+		Prompt:         "How does recall work?",
+		CreatedAt:      "2026-11-10T12:00:00Z",
+		ResultCount:    1,
+		CandidateCount: 2,
+		ScoreCutoff:    0.7,
+		LexicalCutoff:  0.5,
+		Results: []knowledge.RecallResult{
+			{
+				Rank: 1, SelectedRank: 1, Status: "selected", Feedback: "useful",
+				SourceID: "selected-id", Title: "Selected memory", Content: "selected content", Kind: "fact",
+				Score: 0.9, SemanticScore: 0.8, LexicalScore: 0.7, ProjectBoost: 0.1,
+			},
+			{
+				Rank: 2, Status: "cutoff", SourceID: "cut-id", Title: "Cut candidate", Content: "cut content", Kind: "decision",
+				Score: 0.4, SemanticScore: 0.3, LexicalScore: 0.2,
+			},
+		},
+	}
+
+	var show bytes.Buffer
+	writeRecallShow(&show, event)
+	for _, expected := range []string{"Injected memories:", "[1] Selected memory", "feedback=useful", "selected content"} {
+		if !strings.Contains(show.String(), expected) {
+			t.Fatalf("show missing %q: %s", expected, show.String())
+		}
+	}
+	for _, internal := range []string{"Candidates:", "score=", "status=selected", "selected-id", "cut content"} {
+		if strings.Contains(show.String(), internal) {
+			t.Fatalf("show contains audit detail %q: %s", internal, show.String())
+		}
+	}
+
+	var explain bytes.Buffer
+	writeRecallExplanation(&explain, event)
+	for _, expected := range []string{
+		"Candidates: 2; selected: 1",
+		"selected-id",
+		"status=selected selected_rank=1 feedback=useful",
+		"score=0.9000",
+		"status=cutoff",
+		"cut content",
+	} {
+		if !strings.Contains(explain.String(), expected) {
+			t.Fatalf("explain missing %q: %s", expected, explain.String())
 		}
 	}
 }

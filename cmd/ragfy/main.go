@@ -328,14 +328,45 @@ func recallsCommand(arguments []string, output io.Writer) error {
 	if err := json.Unmarshal(body, &event); err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Recall %s\nSession: %s\nSource: %s\nProject: %s\nCreated: %s\nPrompt: %s\n", event.ID, event.SessionID, event.Source, valueOrDash(event.Project), event.CreatedAt, event.Prompt)
 	if action == "explain" {
-		fmt.Fprintf(output, "Candidates: %d; selected: %d; score cutoff: %.4f; lexical-match score cutoff: %.4f\n", event.CandidateCount, event.ResultCount, event.ScoreCutoff, event.LexicalCutoff)
+		writeRecallExplanation(output, event)
+	} else {
+		writeRecallShow(output, event)
 	}
+	return nil
+}
+
+func writeRecallHeader(output io.Writer, event knowledge.RecallEvent) {
+	fmt.Fprintf(output, "Recall %s\nSession: %s\nSource: %s\nProject: %s\nCreated: %s\nPrompt: %s\n", event.ID, event.SessionID, event.Source, valueOrDash(event.Project), event.CreatedAt, event.Prompt)
+}
+
+func writeRecallShow(output io.Writer, event knowledge.RecallEvent) {
+	writeRecallHeader(output, event)
+	if event.ResultCount == 0 {
+		fmt.Fprintln(output, "\nNo memories were injected.")
+		return
+	}
+	fmt.Fprintln(output, "\nInjected memories:")
 	for _, result := range event.Results {
-		if action == "show" && result.Status != "selected" {
+		if result.Status != "selected" {
 			continue
 		}
+		rank := result.SelectedRank
+		if rank == 0 {
+			rank = result.Rank
+		}
+		feedback := result.Feedback
+		if feedback == "" {
+			feedback = "unrated"
+		}
+		fmt.Fprintf(output, "\n[%d] %s\nfeedback=%s\n%s\n", rank, result.Title, feedback, result.Content)
+	}
+}
+
+func writeRecallExplanation(output io.Writer, event knowledge.RecallEvent) {
+	writeRecallHeader(output, event)
+	fmt.Fprintf(output, "Candidates: %d; selected: %d; score cutoff: %.4f; lexical-match score cutoff: %.4f\n", event.CandidateCount, event.ResultCount, event.ScoreCutoff, event.LexicalCutoff)
+	for _, result := range event.Results {
 		status := result.Status
 		if result.SelectedRank > 0 {
 			status += fmt.Sprintf(" selected_rank=%d", result.SelectedRank)
@@ -345,7 +376,6 @@ func recallsCommand(arguments []string, output io.Writer) error {
 		}
 		fmt.Fprintf(output, "\n[%d] %s (%s, %s)\nstatus=%s score=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f\n%s\n", result.Rank, result.Title, result.Kind, result.SourceID, status, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost, result.Content)
 	}
-	return nil
 }
 
 func jsonCommandArguments(arguments []string) ([]string, bool, error) {
