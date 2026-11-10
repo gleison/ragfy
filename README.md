@@ -44,6 +44,9 @@ ragfy status --verbose
 ragfy status --json
 ragfy update
 ragfy search "How is authentication configured?"
+ragfy sessions list
+ragfy sessions show <session-id>
+ragfy recalls list
 ragfy ingest ~/Documents/Knowledge
 ragfy ingest --project ragfy ./docs
 ragfy ingest --text "Production uses PostgreSQL 17."
@@ -57,6 +60,10 @@ ragfy ingest --provider claude --text "Production uses PostgreSQL 17."
 `update` downloads the current installer over HTTPS and asks it to replace a direct installation in the same prefix. Homebrew-managed installations are left to `brew upgrade ragfy`.
 
 `search` runs the same hybrid semantic and lexical search used by the prompt hook and prints the matching active memories. Global memories are always searched; pass `--project <name>` to also search memories scoped to a project.
+
+`sessions list` shows digested sessions and active or superseded record counts. `sessions show <session-id>` displays preserved source versions and their derived knowledge. `sessions forget <session-id>` removes that session, its source versions, derived records, and recall history in one transaction; records superseded by the removed knowledge are reactivated. Add `--json` to any of these commands for machine-readable output.
+
+Prompt-hook recalls are recorded locally with their session, prompt, selected memory snapshots, and ranking scores. `recalls list` shows the history and `recalls show <recall-id>` explains one injected result set. CLI searches are not recorded as injected prompt context. Both commands support `--json`.
 
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 
@@ -85,7 +92,7 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 ## Architecture and legacy files
 
 ```text
-UserPromptSubmit -> provider hook -> local service -> local embeddings + hybrid search -> context
+UserPromptSubmit -> provider hook -> local embeddings + hybrid search -> context + SQLite recall audit
 SessionEnd       -> provider hook -> digestion queue -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ingest           -> file or text -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ```

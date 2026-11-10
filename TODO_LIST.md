@@ -11,12 +11,13 @@
 
 ## Controle e auditoria da memória
 
-- [ ] Implementar `ragfy sessions list`.
-- [ ] Implementar `ragfy sessions show <session-id>` com conhecimentos, origem e estado.
-- [ ] Implementar `ragfy sessions forget <session-id>` de forma transacional.
-- [ ] Ao esquecer uma sessão, reativar com segurança registros que tenham sido superseded por conhecimentos removidos.
+- [x] Implementar `ragfy sessions list`.
+- [x] Implementar `ragfy sessions show <session-id>` com conhecimentos, origem e estado.
+- [x] Implementar `ragfy sessions forget <session-id>` de forma transacional.
+- [x] Ao esquecer uma sessão, reativar com segurança registros que tenham sido superseded por conhecimentos removidos.
 - [x] Implementar busca direta pelo CLI usando o mesmo caminho de recuperação do hook (`ragfy search`).
-- [ ] Registrar os resultados efetivamente injetados por recall, associados à sessão e ao prompt.
+- [x] Registrar os resultados efetivamente injetados por recall, associados à sessão e ao prompt.
+- [x] Permitir revisar o histórico e as pontuações com `ragfy recalls list|show`.
 - [ ] Criar uma forma de marcar resultados como úteis ou irrelevantes.
 - [ ] Criar um comando de explicação do recall com candidatos, cortes e pontuações.
 

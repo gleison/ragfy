@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -248,5 +249,70 @@ func TestSQLiteCommitSessionIsAtomicAndRestoresReplacedWinnerDependents(t *testi
 	}
 	if len(stored) != 3 || stored[0].SourceID != "winner" || stored[0].Status != knowledge.StatusSuperseded || stored[1].SourceID != "dependent" || stored[1].Status != knowledge.StatusActive || stored[2].SourceID != "new" {
 		t.Fatalf("replacement did not restore dependent: %#v", stored)
+	}
+}
+
+func TestSessionsInspectAndForgetTransactionally(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	oldSource := testSource("old-source", "session", "old-session")
+	oldSource.Provider, oldSource.Project = "codex", "ragfy"
+	oldDocument := knowledge.Document{Source: "transcripts", SourceID: "old-record", Title: "Old", Content: "old knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1}}
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "old-session", TranscriptHash: "old-hash", Source: oldSource, Documents: []knowledge.Document{oldDocument}}); err != nil {
+		t.Fatal(err)
+	}
+	newSource := testSource("new-source", "session", "new-session")
+	newSource.Provider, newSource.Project = "claude", "ragfy"
+	newDocument := knowledge.Document{Source: "transcripts", SourceID: "new-record", Title: "New", Content: "new knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1}}
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{
+		SessionID: "new-session", TranscriptHash: "new-hash", Source: newSource, Documents: []knowledge.Document{newDocument},
+		Supersessions: []knowledge.Supersession{{LoserSourceID: "old-record", WinnerSourceID: "new-record", Reason: "supersedes"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	event := knowledge.RecallEvent{
+		ID: "recall-one", SessionID: "new-session", Source: "claude", Project: "ragfy", Prompt: "what is new?", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Results: []knowledge.RecallResult{{Rank: 1, SourceID: "new-record", Title: "New", Content: "new knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Score: .9, SemanticScore: .8, LexicalScore: .4, ProjectBoost: .05}},
+	}
+	if err := repo.RecordRecall(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+
+	sessions, err := repo.Sessions(ctx)
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("sessions=%#v err=%v", sessions, err)
+	}
+	detail, err := repo.Session(ctx, "new-session")
+	if err != nil || detail.Provider != "claude" || detail.Project != "ragfy" || detail.SourceVersions != 1 || detail.ActiveRecords != 1 || len(detail.Documents) != 1 || detail.Documents[0].OriginID != "new-source" {
+		t.Fatalf("detail=%#v err=%v", detail, err)
+	}
+	events, err := repo.RecallEvents(ctx)
+	if err != nil || len(events) != 1 || events[0].ResultCount != 1 {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	storedEvent, err := repo.RecallEvent(ctx, "recall-one")
+	if err != nil || len(storedEvent.Results) != 1 || storedEvent.Results[0].SourceID != "new-record" || storedEvent.Results[0].Score != .9 {
+		t.Fatalf("event=%#v err=%v", storedEvent, err)
+	}
+
+	forgotten, err := repo.ForgetSession(ctx, "new-session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forgotten.RemovedSources != 1 || forgotten.RemovedRecords != 1 || forgotten.ReactivatedRecords != 1 || forgotten.RemovedRecalls != 1 {
+		t.Fatalf("forgotten=%#v", forgotten)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil || len(documents) != 1 || documents[0].SourceID != "old-record" || documents[0].Status != knowledge.StatusActive || documents[0].SupersededBy != "" {
+		t.Fatalf("documents=%#v err=%v", documents, err)
+	}
+	if _, err := repo.Session(ctx, "new-session"); !errors.Is(err, knowledge.ErrNotFound) {
+		t.Fatalf("forgotten session err=%v", err)
+	}
+	if _, err := repo.RecallEvent(ctx, "recall-one"); !errors.Is(err, knowledge.ErrNotFound) {
+		t.Fatalf("forgotten recall err=%v", err)
+	}
+	if _, err := repo.ForgetSession(ctx, "new-session"); !errors.Is(err, knowledge.ErrNotFound) {
+		t.Fatalf("second forget err=%v", err)
 	}
 }

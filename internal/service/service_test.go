@@ -168,6 +168,48 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 	}
 }
 
+func TestRecallAuditAndSessionRoutes(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	source := knowledge.Source{ID: "session-source", Kind: "session", Key: "session-one", Provider: "codex", Project: "ragfy", Title: "Session session-one", Content: "conversation", ContentHash: "hash", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	document := knowledge.Document{Source: "transcripts", SourceID: "remembered", Title: "Remembered fact", Content: "Ragfy records selected recall results.", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1, 0}}
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "session-one", TranscriptHash: "hash", Source: source, Documents: []knowledge.Document{document}}); err != nil {
+		t.Fatal(err)
+	}
+	service := newTestService(repo, repo, &fakeModelEngine{}, 1)
+	handler := service.Routes("secret")
+	recall := requestJSON(t, handler, http.MethodPost, "/recall", "secret", api.HookPayload{Source: "codex", SessionID: "session-one", Prompt: "How are selected recall results recorded?", CWD: "/workspace/ragfy"})
+	if recall.Code != http.StatusOK || !strings.Contains(recall.Body.String(), "Remembered fact") {
+		t.Fatalf("recall=%d %s", recall.Code, recall.Body.String())
+	}
+	list := requestJSON(t, handler, http.MethodGet, "/recalls", "secret", nil)
+	var events []knowledge.RecallEvent
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &events) != nil || len(events) != 1 || events[0].SessionID != "session-one" || events[0].ResultCount != 1 {
+		t.Fatalf("recalls=%d %s", list.Code, list.Body.String())
+	}
+	detail := requestJSON(t, handler, http.MethodGet, "/recalls/"+events[0].ID, "secret", nil)
+	var event knowledge.RecallEvent
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &event) != nil || len(event.Results) != 1 || event.Results[0].SourceID != "remembered" {
+		t.Fatalf("recall detail=%d %s", detail.Code, detail.Body.String())
+	}
+	sessions := requestJSON(t, handler, http.MethodGet, "/sessions", "secret", nil)
+	if sessions.Code != http.StatusOK || !strings.Contains(sessions.Body.String(), "session-one") {
+		t.Fatalf("sessions=%d %s", sessions.Code, sessions.Body.String())
+	}
+	session := requestJSON(t, handler, http.MethodGet, "/sessions/session-one", "secret", nil)
+	if session.Code != http.StatusOK || !strings.Contains(session.Body.String(), "remembered") {
+		t.Fatalf("session=%d %s", session.Code, session.Body.String())
+	}
+	forgotten := requestJSON(t, handler, http.MethodDelete, "/sessions/session-one", "secret", nil)
+	if forgotten.Code != http.StatusOK || !strings.Contains(forgotten.Body.String(), `"removed_records":1`) || !strings.Contains(forgotten.Body.String(), `"removed_recalls":1`) {
+		t.Fatalf("forget=%d %s", forgotten.Code, forgotten.Body.String())
+	}
+	missing := requestJSON(t, handler, http.MethodGet, "/sessions/session-one", "secret", nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing session status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestRecallUsesGlobalAndCurrentProjectKnowledge(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)

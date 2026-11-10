@@ -29,3 +29,27 @@ func TestHelpDescribesSearchAndTextIngest(t *testing.T) {
 		t.Fatalf("ingest help = %q", ingest.String())
 	}
 }
+
+func TestHelpDescribesSessionAndRecallAudit(t *testing.T) {
+	var global bytes.Buffer
+	writeGlobalHelp(&global)
+	if !strings.Contains(global.String(), "List, inspect, or forget") || !strings.Contains(global.String(), "memories injected") {
+		t.Fatalf("global help = %q", global.String())
+	}
+	var sessions, recalls bytes.Buffer
+	if !writeCommandHelp(&sessions, "sessions") || !strings.Contains(sessions.String(), "sessions forget") || !strings.Contains(sessions.String(), "reactivates") {
+		t.Fatalf("sessions help = %q", sessions.String())
+	}
+	if !writeCommandHelp(&recalls, "recalls") || !strings.Contains(recalls.String(), "ranking scores") {
+		t.Fatalf("recalls help = %q", recalls.String())
+	}
+}
+
+func TestJSONCommandArgumentsAcceptsFlagBeforeOrAfterIdentifier(t *testing.T) {
+	for _, arguments := range [][]string{{"--json", "session"}, {"session", "--json"}} {
+		remaining, asJSON, err := jsonCommandArguments(arguments)
+		if err != nil || !asJSON || len(remaining) != 1 || remaining[0] != "session" {
+			t.Fatalf("arguments=%#v remaining=%#v json=%v err=%v", arguments, remaining, asJSON, err)
+		}
+	}
+}

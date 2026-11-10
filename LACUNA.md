@@ -4,9 +4,9 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 
 | Estado | Capacidade do legado | Situação atual | Prioridade |
 | --- | --- | --- | --- |
-| Parcial | Inspecionar e pesquisar diretamente a base | `ragfy search` usa o mesmo retriever do hook e `status` expõe estatísticas agregadas; ainda faltam listagem e inspeção de fontes, sessões e registros | Alta |
-| Pendente | Remover ou corrigir conhecimento | Não há comando público para esquecer uma sessão, fonte ou registro | Alta |
-| Parcial | Avaliar o que o recall realmente injetou | Os logs mostram candidatos, cortes, componentes da pontuação e seleção; ainda não há histórico associado ao prompt e à sessão, nem veredito humano | Alta |
+| Parcial | Inspecionar e pesquisar diretamente a base | `ragfy search` usa o mesmo retriever do hook, `status` expõe estatísticas agregadas e `sessions list|show` inspeciona sessões, fontes e registros; ainda falta uma visão geral de fontes não ligadas a sessões | Média |
+| Parcial | Remover ou corrigir conhecimento | `sessions forget` remove uma sessão transacionalmente e reativa dependentes; ainda não há correção ou remoção seletiva de uma fonte ou registro | Média |
+| Parcial | Avaliar o que o recall realmente injetou | `recalls list|show` preserva por prompt e sessão os resultados injetados e suas pontuações; ainda faltam veredito humano e persistência dos candidatos cortados | Alta |
 | Pendente | Calibrar relevância com evidência | Os limiares atuais estão fixos no código; o legado tinha probe, feedback e autotune | Alta |
 | Parcial | Ingestão realmente idempotente | Conteúdo inalterado não é extraído nem re-embeddado; uma versão alterada preserva a fonte anterior e aposenta seus registros. Ainda falta detectar arquivos que desapareceram de uma raiz ingerida e testar o ciclo completo de arquivos | Alta antes de ampliar a ingestão |
 | Pendente | Recall para subagentes | O legado configurava `SubagentStart`; o Go registra somente `UserPromptSubmit` e `SessionEnd` | Média |
@@ -23,4 +23,4 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 
 ## Direção recomendada
 
-O próximo incremento deve tornar a memória observável e reversível. A primeira fatia é somente leitura: `ragfy sessions list` e `ragfy sessions show <session-id>`, apoiados nas fontes e registros que agora são preservados. A fatia seguinte é `sessions forget`, com remoção transacional e reativação segura dos registros que dependiam dos conhecimentos removidos. Depois disso, o Ragfy deve persistir e permitir revisar os resultados efetivamente injetados pelo recall antes de adotar novos heurísticos de ranking ou limpeza automática.
+A memória de sessões já é observável e reversível por `sessions list|show|forget`, e os resultados efetivamente injetados já podem ser revisados por `recalls list|show`. O próximo incremento deve fechar o ciclo de avaliação: marcar resultados como úteis ou irrelevantes e persistir também candidatos e motivos de corte. Só então esses dados devem orientar calibração de limiares ou novos heurísticos de ranking. Em paralelo, a principal pendência de integridade é detectar arquivos removidos de uma raiz ingerida.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/hook"
+	"ragfy/internal/knowledge"
 	"ragfy/internal/model"
 	"ragfy/internal/platform"
 	"ragfy/internal/reconciliation"
@@ -94,6 +96,16 @@ func run(command string, arguments []string) error {
 			return err
 		}
 		return search(commandArguments(arguments), os.Stdout)
+	case "sessions":
+		if err := requireSetup(); err != nil {
+			return err
+		}
+		return sessionsCommand(commandArguments(arguments), os.Stdout)
+	case "recalls":
+		if err := requireSetup(); err != nil {
+			return err
+		}
+		return recallsCommand(commandArguments(arguments), os.Stdout)
 	case "version", "--version":
 		fmt.Fprintf(os.Stdout, "ragfy %s (%s, %s)\n", buildinfo.DisplayVersion(), buildinfo.Commit, buildinfo.Date)
 		return nil
@@ -167,6 +179,169 @@ func search(arguments []string, output io.Writer) error {
 		return errors.New("provide a search phrase; run `ragfy help search`")
 	}
 	return platform.RequestSearch(strings.Join(flags.Args(), " "), *project, settings.ListenAddress, output)
+}
+
+func sessionsCommand(arguments []string, output io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("usage: ragfy sessions list|show|forget")
+	}
+	action := arguments[0]
+	remaining, asJSON, err := jsonCommandArguments(arguments[1:])
+	if err != nil {
+		return errors.New("run `ragfy help sessions` for usage")
+	}
+	sessionID := ""
+	switch action {
+	case "list":
+		if len(remaining) != 0 {
+			return errors.New("usage: ragfy sessions list [--json]")
+		}
+	case "show", "forget":
+		if len(remaining) != 1 {
+			return fmt.Errorf("usage: ragfy sessions %s <session-id> [--json]", action)
+		}
+		sessionID = remaining[0]
+	default:
+		return fmt.Errorf("unknown sessions action %q", action)
+	}
+	body, err := platform.RequestSessions(action, sessionID, settings.ListenAddress)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		fmt.Fprintln(output, string(body))
+		return nil
+	}
+	switch action {
+	case "list":
+		var sessions []knowledge.Session
+		if err := json.Unmarshal(body, &sessions); err != nil {
+			return err
+		}
+		if len(sessions) == 0 {
+			fmt.Fprintln(output, "No digested sessions found.")
+			return nil
+		}
+		for _, session := range sessions {
+			fmt.Fprintf(output, "%s  %s  provider=%s project=%s sources=%d active=%d superseded=%d\n", session.ID, session.DigestedAt, valueOrDash(session.Provider), valueOrDash(session.Project), session.SourceVersions, session.ActiveRecords, session.SupersededRecords)
+		}
+	case "show":
+		var session knowledge.Session
+		if err := json.Unmarshal(body, &session); err != nil {
+			return err
+		}
+		writeSession(output, session)
+	case "forget":
+		var result knowledge.ForgetResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Forgot session %s: removed %d source versions, %d records, and %d recall events; reactivated %d records.\n", result.SessionID, result.RemovedSources, result.RemovedRecords, result.RemovedRecalls, result.ReactivatedRecords)
+	}
+	return nil
+}
+
+func writeSession(output io.Writer, session knowledge.Session) {
+	fmt.Fprintf(output, "Session %s\nProvider: %s\nProject: %s\nDigested: %s\nTranscript hash: %s\nSource versions: %d\nRecords: %d active, %d superseded\n", session.ID, valueOrDash(session.Provider), valueOrDash(session.Project), session.DigestedAt, session.TranscriptHash, session.SourceVersions, session.ActiveRecords, session.SupersededRecords)
+	for _, source := range session.Sources {
+		fmt.Fprintf(output, "\nSource %s\n  Created: %s\n  Provider: %s\n  Project: %s\n  Hash: %s\n", source.ID, source.CreatedAt, valueOrDash(source.Provider), valueOrDash(source.Project), source.ContentHash)
+	}
+	for _, document := range session.Documents {
+		fmt.Fprintf(output, "\n[%s] %s (%s, %s)\n%s\n", document.Status, document.Title, document.Kind, document.SourceID, document.Content)
+		if document.SupersededBy != "" {
+			fmt.Fprintf(output, "Superseded by: %s (%s)\n", document.SupersededBy, document.ConsolidationReason)
+		}
+	}
+}
+
+func recallsCommand(arguments []string, output io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("usage: ragfy recalls list|show")
+	}
+	action := arguments[0]
+	remaining, asJSON, err := jsonCommandArguments(arguments[1:])
+	if err != nil {
+		return errors.New("run `ragfy help recalls` for usage")
+	}
+	recallID := ""
+	switch action {
+	case "list":
+		if len(remaining) != 0 {
+			return errors.New("usage: ragfy recalls list [--json]")
+		}
+	case "show":
+		if len(remaining) != 1 {
+			return errors.New("usage: ragfy recalls show <recall-id> [--json]")
+		}
+		recallID = remaining[0]
+	default:
+		return fmt.Errorf("unknown recalls action %q", action)
+	}
+	body, err := platform.RequestRecalls(recallID, settings.ListenAddress)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		fmt.Fprintln(output, string(body))
+		return nil
+	}
+	if action == "list" {
+		var events []knowledge.RecallEvent
+		if err := json.Unmarshal(body, &events); err != nil {
+			return err
+		}
+		if len(events) == 0 {
+			fmt.Fprintln(output, "No recalled prompts recorded.")
+			return nil
+		}
+		for _, event := range events {
+			fmt.Fprintf(output, "%s  %s  session=%s results=%d  %s\n", event.ID, event.CreatedAt, event.SessionID, event.ResultCount, truncateLine(event.Prompt, 80))
+		}
+		return nil
+	}
+	var event knowledge.RecallEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return err
+	}
+	fmt.Fprintf(output, "Recall %s\nSession: %s\nSource: %s\nProject: %s\nCreated: %s\nPrompt: %s\n", event.ID, event.SessionID, event.Source, valueOrDash(event.Project), event.CreatedAt, event.Prompt)
+	for _, result := range event.Results {
+		fmt.Fprintf(output, "\n[%d] %s (%s, %s)\nscore=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f\n%s\n", result.Rank, result.Title, result.Kind, result.SourceID, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost, result.Content)
+	}
+	return nil
+}
+
+func jsonCommandArguments(arguments []string) ([]string, bool, error) {
+	remaining := make([]string, 0, len(arguments))
+	asJSON := false
+	for _, argument := range arguments {
+		if argument == "--json" {
+			if asJSON {
+				return nil, false, errors.New("duplicate --json")
+			}
+			asJSON = true
+			continue
+		}
+		if strings.HasPrefix(argument, "-") {
+			return nil, false, fmt.Errorf("unknown option %s", argument)
+		}
+		remaining = append(remaining, argument)
+	}
+	return remaining, asJSON, nil
+}
+
+func valueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func truncateLine(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit-3] + "..."
 }
 
 func serve() (resultErr error) {
@@ -356,6 +531,8 @@ Commands:
   setup       Configure the embedding model, integrations, hooks, and service
   status      Check setup, service health, model cache, hooks, and knowledge
   search      Find stored memories using a phrase
+  sessions    List, inspect, or forget digested sessions
+  recalls     Review the memories injected for earlier prompts
   ingest      Extract durable knowledge from files or supplied text
   update      Install the latest published release
   version     Print version and build information
@@ -393,6 +570,22 @@ Options:
 Search active memories using the same hybrid semantic and lexical retrieval used
 by the prompt hook. Global memories are always searched; --project also includes
 memories scoped to that project.
+`,
+		"sessions": `Usage:
+  ragfy sessions list [--json]
+  ragfy sessions show <session-id> [--json]
+  ragfy sessions forget <session-id> [--json]
+
+List and inspect digested sessions and their preserved source versions and
+knowledge records. Forget removes one session transactionally and reactivates
+records that were superseded by knowledge from the forgotten session.
+`,
+		"recalls": `Usage:
+  ragfy recalls list [--json]
+  ragfy recalls show <recall-id> [--json]
+
+Review prompt recalls recorded by hooks, including the exact selected memories
+and their semantic, lexical, project, and final ranking scores.
 `,
 		"ingest": `Usage:
   ragfy ingest [--project <name>] [--provider codex|claude] <path>

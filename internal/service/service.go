@@ -102,6 +102,11 @@ func (service *Service) Routes(token string) http.Handler {
 	mux.HandleFunc("POST /recall", authenticate(token, service.handleRecall))
 	mux.HandleFunc("POST /digest", authenticate(token, service.handleDigest))
 	mux.HandleFunc("POST /ingest", authenticate(token, service.handleIngest))
+	mux.HandleFunc("GET /sessions", authenticate(token, service.handleSessions))
+	mux.HandleFunc("GET /sessions/{id}", authenticate(token, service.handleSession))
+	mux.HandleFunc("DELETE /sessions/{id}", authenticate(token, service.handleForgetSession))
+	mux.HandleFunc("GET /recalls", authenticate(token, service.handleRecalls))
+	mux.HandleFunc("GET /recalls/{id}", authenticate(token, service.handleRecallEvent))
 	return mux
 }
 
@@ -154,10 +159,89 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 	for index, hit := range hits {
 		fmt.Fprintf(&contextText, "[%d] %s\n%s\n\n", index+1, hit.Doc.Title, hit.Doc.Content)
 	}
+	if payload.Source != "cli" && strings.TrimSpace(payload.SessionID) != "" {
+		now := time.Now().UTC()
+		event := knowledge.RecallEvent{
+			ID:        SHA256Hex([]byte(payload.SessionID + "\x00" + query + "\x00" + now.Format(time.RFC3339Nano))),
+			SessionID: payload.SessionID,
+			Source:    payload.Source,
+			Project:   project,
+			Prompt:    query,
+			CreatedAt: now.Format(time.RFC3339Nano),
+		}
+		for index, hit := range hits {
+			event.Results = append(event.Results, knowledge.RecallResult{
+				Rank: index + 1, SourceID: hit.Doc.SourceID, Title: hit.Doc.Title, Content: hit.Doc.Content,
+				Kind: hit.Doc.Kind, Scope: hit.Doc.Scope, Project: hit.Doc.Project, Score: hit.Score,
+				SemanticScore: hit.SemanticScore, LexicalScore: hit.LexicalScore, ProjectBoost: hit.ProjectBoost,
+			})
+		}
+		event.ResultCount = len(event.Results)
+		if err := service.repository.RecordRecall(request.Context(), event); err != nil {
+			log.Printf("recall audit session=%s: %v", payload.SessionID, err)
+		}
+	}
 	if contextText.Len() > 0 && payload.Source != "cli" {
 		contextText.WriteString("\n---\nKB RECALL: Retrieved from your local knowledge base. Use only when relevant.")
 	}
 	writeJSON(writer, api.RecallResponse{Context: contextText.String()})
+}
+
+func (service *Service) handleSessions(writer http.ResponseWriter, request *http.Request) {
+	sessions, err := service.repository.Sessions(request.Context())
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, sessions)
+}
+
+func (service *Service) handleSession(writer http.ResponseWriter, request *http.Request) {
+	session, err := service.repository.Session(request.Context(), request.PathValue("id"))
+	if errors.Is(err, knowledge.ErrNotFound) {
+		http.Error(writer, "session not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, session)
+}
+
+func (service *Service) handleForgetSession(writer http.ResponseWriter, request *http.Request) {
+	result, err := service.repository.ForgetSession(request.Context(), request.PathValue("id"))
+	if errors.Is(err, knowledge.ErrNotFound) {
+		http.Error(writer, "session not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, result)
+}
+
+func (service *Service) handleRecalls(writer http.ResponseWriter, request *http.Request) {
+	events, err := service.repository.RecallEvents(request.Context())
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, events)
+}
+
+func (service *Service) handleRecallEvent(writer http.ResponseWriter, request *http.Request) {
+	event, err := service.repository.RecallEvent(request.Context(), request.PathValue("id"))
+	if errors.Is(err, knowledge.ErrNotFound) {
+		http.Error(writer, "recall not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(writer, event)
 }
 
 func (service *Service) handleDigest(writer http.ResponseWriter, request *http.Request) {

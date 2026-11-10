@@ -1,6 +1,11 @@
 package knowledge
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+var ErrNotFound = errors.New("not found")
 
 type Scope string
 
@@ -88,6 +93,52 @@ type Statistics struct {
 	Projects          int `json:"projects"`
 }
 
+type Session struct {
+	ID                string     `json:"id"`
+	Provider          string     `json:"provider,omitempty"`
+	Project           string     `json:"project,omitempty"`
+	TranscriptHash    string     `json:"transcript_hash"`
+	DigestedAt        string     `json:"digested_at"`
+	SourceVersions    int        `json:"source_versions"`
+	ActiveRecords     int        `json:"active_records"`
+	SupersededRecords int        `json:"superseded_records"`
+	Sources           []Source   `json:"sources,omitempty"`
+	Documents         []Document `json:"documents,omitempty"`
+}
+
+type ForgetResult struct {
+	SessionID          string `json:"session_id"`
+	RemovedSources     int    `json:"removed_sources"`
+	RemovedRecords     int    `json:"removed_records"`
+	ReactivatedRecords int    `json:"reactivated_records"`
+	RemovedRecalls     int    `json:"removed_recalls"`
+}
+
+type RecallResult struct {
+	Rank          int     `json:"rank"`
+	SourceID      string  `json:"source_id"`
+	Title         string  `json:"title"`
+	Content       string  `json:"content"`
+	Kind          string  `json:"kind"`
+	Scope         Scope   `json:"scope"`
+	Project       string  `json:"project,omitempty"`
+	Score         float64 `json:"score"`
+	SemanticScore float64 `json:"semantic_score"`
+	LexicalScore  float64 `json:"lexical_score"`
+	ProjectBoost  float64 `json:"project_boost"`
+}
+
+type RecallEvent struct {
+	ID          string         `json:"id"`
+	SessionID   string         `json:"session_id,omitempty"`
+	Source      string         `json:"source"`
+	Project     string         `json:"project,omitempty"`
+	Prompt      string         `json:"prompt"`
+	CreatedAt   string         `json:"created_at"`
+	ResultCount int            `json:"result_count"`
+	Results     []RecallResult `json:"results,omitempty"`
+}
+
 type Repository interface {
 	Upsert(context.Context, Document) error
 	EmbeddingModel(context.Context) (string, error)
@@ -100,4 +151,10 @@ type Repository interface {
 	CommitSource(context.Context, SourceCommit) error
 	Sources(context.Context) ([]Source, error)
 	Statistics(context.Context) (Statistics, error)
+	Sessions(context.Context) ([]Session, error)
+	Session(context.Context, string) (Session, error)
+	ForgetSession(context.Context, string) (ForgetResult, error)
+	RecordRecall(context.Context, RecallEvent) error
+	RecallEvents(context.Context) ([]RecallEvent, error)
+	RecallEvent(context.Context, string) (RecallEvent, error)
 }

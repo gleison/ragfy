@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -282,7 +283,31 @@ func RequestSearch(query, project, listenAddress string, output io.Writer) error
 	return nil
 }
 
+func RequestSessions(action, sessionID, listenAddress string) ([]byte, error) {
+	path := "sessions"
+	method := http.MethodGet
+	if sessionID != "" {
+		path += "/" + url.PathEscape(sessionID)
+	}
+	if action == "forget" {
+		method = http.MethodDelete
+	}
+	return requestServiceMethod(method, path, nil, listenAddress, 30*time.Second)
+}
+
+func RequestRecalls(recallID, listenAddress string) ([]byte, error) {
+	path := "recalls"
+	if recallID != "" {
+		path += "/" + url.PathEscape(recallID)
+	}
+	return requestServiceMethod(http.MethodGet, path, nil, listenAddress, 10*time.Second)
+}
+
 func requestService(action string, payload any, listenAddress string, timeout time.Duration) ([]byte, error) {
+	return requestServiceMethod(http.MethodPost, action, payload, listenAddress, timeout)
+}
+
+func requestServiceMethod(method, action string, payload any, listenAddress string, timeout time.Duration) ([]byte, error) {
 	dataDirectory, err := AppDataDir()
 	if err != nil {
 		return nil, err
@@ -291,16 +316,22 @@ func requestService(action string, payload any, listenAddress string, timeout ti
 	if err != nil {
 		return nil, errors.New("service is not installed; run ragfy setup")
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
+	var body io.Reader
+	if payload != nil {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		body = strings.NewReader(string(encoded))
 	}
-	request, err := http.NewRequest(http.MethodPost, "http://"+listenAddress+"/"+action, strings.NewReader(string(body)))
+	request, err := http.NewRequest(method, "http://"+listenAddress+"/"+action, body)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	request.Header.Set("Content-Type", "application/json")
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := (&http.Client{Timeout: timeout}).Do(request)
 	if err != nil {
 		return nil, errors.New("service is not running; run `ragfy setup`")

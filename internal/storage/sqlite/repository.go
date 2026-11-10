@@ -94,6 +94,199 @@ func (repository *Repository) Sources(ctx context.Context) ([]knowledge.Source, 
 	return sources, rows.Err()
 }
 
+func (repository *Repository) Sessions(ctx context.Context) ([]knowledge.Session, error) {
+	rows, err := repository.database.QueryContext(ctx, `SELECT
+ ds.session_id,ds.transcript_hash,ds.created_at,
+ COALESCE((SELECT provider FROM knowledge_sources WHERE kind='session' AND source_key=ds.session_id ORDER BY created_at DESC,id DESC LIMIT 1),''),
+ COALESCE((SELECT project FROM knowledge_sources WHERE kind='session' AND source_key=ds.session_id ORDER BY created_at DESC,id DESC LIMIT 1),''),
+ (SELECT COUNT(*) FROM knowledge_sources WHERE kind='session' AND source_key=ds.session_id),
+ (SELECT COUNT(*) FROM docs WHERE status='active' AND (origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=ds.session_id) OR (origin_id='' AND json_extract(metadata,'$.session_id')=ds.session_id))),
+ (SELECT COUNT(*) FROM docs WHERE status='superseded' AND (origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=ds.session_id) OR (origin_id='' AND json_extract(metadata,'$.session_id')=ds.session_id)))
+ FROM digested_sessions ds ORDER BY ds.created_at DESC,ds.session_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sessions []knowledge.Session
+	for rows.Next() {
+		var session knowledge.Session
+		if err := rows.Scan(&session.ID, &session.TranscriptHash, &session.DigestedAt, &session.Provider, &session.Project, &session.SourceVersions, &session.ActiveRecords, &session.SupersededRecords); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+func (repository *Repository) Session(ctx context.Context, sessionID string) (knowledge.Session, error) {
+	var session knowledge.Session
+	err := repository.database.QueryRowContext(ctx, `SELECT session_id,transcript_hash,created_at FROM digested_sessions WHERE session_id=?`, sessionID).Scan(&session.ID, &session.TranscriptHash, &session.DigestedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return session, knowledge.ErrNotFound
+	}
+	if err != nil {
+		return session, err
+	}
+	sourceRows, err := repository.database.QueryContext(ctx, `SELECT id,kind,source_key,provider,project,title,content,content_hash,created_at FROM knowledge_sources WHERE kind='session' AND source_key=? ORDER BY created_at,id`, sessionID)
+	if err != nil {
+		return session, err
+	}
+	for sourceRows.Next() {
+		var source knowledge.Source
+		if err := sourceRows.Scan(&source.ID, &source.Kind, &source.Key, &source.Provider, &source.Project, &source.Title, &source.Content, &source.ContentHash, &source.CreatedAt); err != nil {
+			sourceRows.Close()
+			return session, err
+		}
+		session.Sources = append(session.Sources, source)
+	}
+	if err := sourceRows.Err(); err != nil {
+		sourceRows.Close()
+		return session, err
+	}
+	if err := sourceRows.Close(); err != nil {
+		return session, err
+	}
+	documentRows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason,origin_id FROM docs WHERE origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=?) OR (origin_id='' AND json_extract(metadata,'$.session_id')=?) ORDER BY id`, sessionID, sessionID)
+	if err != nil {
+		return session, err
+	}
+	defer documentRows.Close()
+	for documentRows.Next() {
+		document, err := scanDocument(documentRows)
+		if err != nil {
+			return session, err
+		}
+		session.Documents = append(session.Documents, document)
+		if document.Status == knowledge.StatusActive {
+			session.ActiveRecords++
+		} else if document.Status == knowledge.StatusSuperseded {
+			session.SupersededRecords++
+		}
+	}
+	if err := documentRows.Err(); err != nil {
+		return session, err
+	}
+	session.SourceVersions = len(session.Sources)
+	if len(session.Sources) > 0 {
+		latest := session.Sources[len(session.Sources)-1]
+		session.Provider = latest.Provider
+		session.Project = latest.Project
+	}
+	return session, nil
+}
+
+func (repository *Repository) ForgetSession(ctx context.Context, sessionID string) (knowledge.ForgetResult, error) {
+	result := knowledge.ForgetResult{SessionID: sessionID}
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return result, err
+	}
+	defer transaction.Rollback()
+	var exists int
+	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM digested_sessions WHERE session_id=?`, sessionID).Scan(&exists); err != nil {
+		return result, err
+	}
+	if exists == 0 {
+		return result, knowledge.ErrNotFound
+	}
+	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_sources WHERE kind='session' AND source_key=?`, sessionID).Scan(&result.RemovedSources); err != nil {
+		return result, err
+	}
+	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs WHERE origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=?) OR (origin_id='' AND json_extract(metadata,'$.session_id')=?)`, sessionID, sessionID).Scan(&result.RemovedRecords); err != nil {
+		return result, err
+	}
+	if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM recall_events WHERE session_id=?`, sessionID).Scan(&result.RemovedRecalls); err != nil {
+		return result, err
+	}
+	reactivated, err := transaction.ExecContext(ctx, `UPDATE docs SET status='active',superseded_by='',superseded_at='',consolidation_reason='' WHERE status='superseded' AND superseded_by IN (
+ SELECT source_id FROM docs WHERE origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=?) OR (origin_id='' AND json_extract(metadata,'$.session_id')=?))
+ AND NOT (origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=?) OR (origin_id='' AND json_extract(metadata,'$.session_id')=?))`, sessionID, sessionID, sessionID, sessionID)
+	if err != nil {
+		return result, err
+	}
+	if count, err := reactivated.RowsAffected(); err == nil {
+		result.ReactivatedRecords = int(count)
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM docs WHERE origin_id IN (SELECT id FROM knowledge_sources WHERE kind='session' AND source_key=?) OR (origin_id='' AND json_extract(metadata,'$.session_id')=?)`, sessionID, sessionID); err != nil {
+		return result, err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM knowledge_sources WHERE kind='session' AND source_key=?`, sessionID); err != nil {
+		return result, err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM recall_results WHERE recall_id IN (SELECT id FROM recall_events WHERE session_id=?)`, sessionID); err != nil {
+		return result, err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM recall_events WHERE session_id=?`, sessionID); err != nil {
+		return result, err
+	}
+	if _, err := transaction.ExecContext(ctx, `DELETE FROM digested_sessions WHERE session_id=?`, sessionID); err != nil {
+		return result, err
+	}
+	if err := transaction.Commit(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (repository *Repository) RecordRecall(ctx context.Context, event knowledge.RecallEvent) error {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_events(id,session_id,source,project,prompt,created_at) VALUES(?,?,?,?,?,?)`, event.ID, event.SessionID, event.Source, event.Project, event.Prompt, event.CreatedAt); err != nil {
+		return err
+	}
+	for _, result := range event.Results {
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_results(recall_id,rank,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, event.ID, result.Rank, result.SourceID, result.Title, result.Content, result.Kind, result.Scope, result.Project, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost); err != nil {
+			return err
+		}
+	}
+	return transaction.Commit()
+}
+
+func (repository *Repository) RecallEvents(ctx context.Context) ([]knowledge.RecallEvent, error) {
+	rows, err := repository.database.QueryContext(ctx, `SELECT e.id,e.session_id,e.source,e.project,e.prompt,e.created_at,COUNT(r.rank) FROM recall_events e LEFT JOIN recall_results r ON r.recall_id=e.id GROUP BY e.id ORDER BY e.created_at DESC,e.id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []knowledge.RecallEvent
+	for rows.Next() {
+		var event knowledge.RecallEvent
+		if err := rows.Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt, &event.ResultCount); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (repository *Repository) RecallEvent(ctx context.Context, recallID string) (knowledge.RecallEvent, error) {
+	var event knowledge.RecallEvent
+	err := repository.database.QueryRowContext(ctx, `SELECT id,session_id,source,project,prompt,created_at FROM recall_events WHERE id=?`, recallID).Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return event, knowledge.ErrNotFound
+	}
+	if err != nil {
+		return event, err
+	}
+	rows, err := repository.database.QueryContext(ctx, `SELECT rank,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost FROM recall_results WHERE recall_id=? ORDER BY rank`, recallID)
+	if err != nil {
+		return event, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var result knowledge.RecallResult
+		if err := rows.Scan(&result.Rank, &result.SourceID, &result.Title, &result.Content, &result.Kind, &result.Scope, &result.Project, &result.Score, &result.SemanticScore, &result.LexicalScore, &result.ProjectBoost); err != nil {
+			return event, err
+		}
+		event.Results = append(event.Results, result)
+	}
+	event.ResultCount = len(event.Results)
+	return event, rows.Err()
+}
+
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
 	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason,origin_id FROM docs ORDER BY id`)
 	if err != nil {
@@ -102,17 +295,29 @@ func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Docume
 	defer rows.Close()
 	var documents []knowledge.Document
 	for rows.Next() {
-		var document knowledge.Document
-		var metadata string
-		var encodedVector []byte
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason, &document.OriginID); err != nil {
+		document, err := scanDocument(rows)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
-		document.Vector = decodeVector(encodedVector)
 		documents = append(documents, document)
 	}
 	return documents, rows.Err()
+}
+
+type documentScanner interface {
+	Scan(...any) error
+}
+
+func scanDocument(scanner documentScanner) (knowledge.Document, error) {
+	var document knowledge.Document
+	var metadata string
+	var encodedVector []byte
+	if err := scanner.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason, &document.OriginID); err != nil {
+		return document, err
+	}
+	_ = json.Unmarshal([]byte(metadata), &document.Metadata)
+	document.Vector = decodeVector(encodedVector)
+	return document, nil
 }
 
 func (repository *Repository) UpdateEmbedding(ctx context.Context, source, sourceID string, vector []float32) error {
