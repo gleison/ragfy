@@ -32,6 +32,7 @@ type Document struct {
 	SupersededBy        string         `json:"superseded_by,omitempty"`
 	SupersededAt        string         `json:"superseded_at,omitempty"`
 	ConsolidationReason string         `json:"consolidation_reason,omitempty"`
+	OriginID            string         `json:"origin_id,omitempty"`
 	Vector              []float32      `json:"-"`
 }
 
@@ -56,14 +57,34 @@ type Supersession struct {
 type SessionCommit struct {
 	SessionID      string
 	TranscriptHash string
+	Source         Source
 	Documents      []Document
 	Supersessions  []Supersession
+}
+
+type Source struct {
+	ID          string
+	Kind        string
+	Key         string
+	Provider    string
+	Project     string
+	Title       string
+	Content     string
+	ContentHash string
+	CreatedAt   string
+}
+
+type SourceCommit struct {
+	Source        Source
+	Documents     []Document
+	Supersessions []Supersession
 }
 
 type Statistics struct {
 	ActiveRecords     int `json:"active_records"`
 	SupersededRecords int `json:"superseded_records"`
 	DigestedSessions  int `json:"digested_sessions"`
+	PreservedSources  int `json:"preserved_sources"`
 	Projects          int `json:"projects"`
 }
 
@@ -75,5 +96,8 @@ type Repository interface {
 	UpdateEmbedding(context.Context, string, string, []float32) error
 	HasSession(context.Context, string, string) (bool, error)
 	CommitSession(context.Context, SessionCommit) error
+	HasSource(context.Context, string) (bool, error)
+	CommitSource(context.Context, SourceCommit) error
+	Sources(context.Context) ([]Source, error)
 	Statistics(context.Context) (Statistics, error)
 }

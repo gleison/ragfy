@@ -71,13 +71,31 @@ func (repository *Repository) Statistics(ctx context.Context) (knowledge.Statist
 COUNT(*) FILTER (WHERE status='active'),
 COUNT(*) FILTER (WHERE status='superseded'),
 (SELECT COUNT(*) FROM digested_sessions),
+(SELECT COUNT(*) FROM knowledge_sources),
 COUNT(DISTINCT CASE WHEN scope='project' THEN project END)
-FROM docs`).Scan(&statistics.ActiveRecords, &statistics.SupersededRecords, &statistics.DigestedSessions, &statistics.Projects)
+FROM docs`).Scan(&statistics.ActiveRecords, &statistics.SupersededRecords, &statistics.DigestedSessions, &statistics.PreservedSources, &statistics.Projects)
 	return statistics, err
 }
 
+func (repository *Repository) Sources(ctx context.Context) ([]knowledge.Source, error) {
+	rows, err := repository.database.QueryContext(ctx, `SELECT id,kind,source_key,provider,project,title,content,content_hash,created_at FROM knowledge_sources ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var sources []knowledge.Source
+	for rows.Next() {
+		var source knowledge.Source
+		if err := rows.Scan(&source.ID, &source.Kind, &source.Key, &source.Provider, &source.Project, &source.Title, &source.Content, &source.ContentHash, &source.CreatedAt); err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason FROM docs ORDER BY id`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason,origin_id FROM docs ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +105,7 @@ func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Docume
 		var document knowledge.Document
 		var metadata string
 		var encodedVector []byte
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason); err != nil {
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason, &document.OriginID); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
@@ -116,27 +134,14 @@ func (repository *Repository) Upsert(ctx context.Context, document knowledge.Doc
 	}
 	_, err := repository.database.ExecContext(ctx, upsertDocumentSQL,
 		document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector,
-		document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason)
+		document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason, document.OriginID)
 	return err
 }
 
-const upsertDocumentSQL = `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
+const upsertDocumentSQL = `INSERT INTO docs(source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason,origin_id)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_id) DO UPDATE SET ts=excluded.ts,title=excluded.title,
 content=excluded.content,metadata=excluded.metadata,kind=excluded.kind,area=excluded.area,scope=excluded.scope,project=excluded.project,embedding=excluded.embedding,
-status=excluded.status,superseded_by=excluded.superseded_by,superseded_at=excluded.superseded_at,consolidation_reason=excluded.consolidation_reason`
-
-func (repository *Repository) MarkSession(ctx context.Context, sessionID, transcriptHash string) (bool, error) {
-	if sessionID == "" {
-		sessionID = transcriptHash
-	}
-	result, err := repository.database.ExecContext(ctx, `INSERT INTO digested_sessions(session_id,transcript_hash,created_at) VALUES(?,?,?)
-ON CONFLICT(session_id) DO UPDATE SET transcript_hash=excluded.transcript_hash,created_at=excluded.created_at`, sessionID, transcriptHash, time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		return false, err
-	}
-	rowsAffected, err := result.RowsAffected()
-	return rowsAffected == 1, err
-}
+status=excluded.status,superseded_by=excluded.superseded_by,superseded_at=excluded.superseded_at,consolidation_reason=excluded.consolidation_reason,origin_id=excluded.origin_id`
 
 func (repository *Repository) HasSession(ctx context.Context, sessionID, transcriptHash string) (bool, error) {
 	var storedHash string
@@ -147,9 +152,10 @@ func (repository *Repository) HasSession(ctx context.Context, sessionID, transcr
 	return storedHash == transcriptHash, err
 }
 
-func (repository *Repository) DeleteSessionDocs(ctx context.Context, sessionID string) error {
-	_, err := repository.database.ExecContext(ctx, `DELETE FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, sessionID)
-	return err
+func (repository *Repository) HasSource(ctx context.Context, sourceID string) (bool, error) {
+	var count int
+	err := repository.database.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_sources WHERE id=?`, sourceID).Scan(&count)
+	return count == 1, err
 }
 
 func (repository *Repository) CommitSession(ctx context.Context, commit knowledge.SessionCommit) error {
@@ -158,66 +164,17 @@ func (repository *Repository) CommitSession(ctx context.Context, commit knowledg
 		return err
 	}
 	defer transaction.Rollback()
-
-	rows, err := transaction.QueryContext(ctx, `SELECT source_id FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, commit.SessionID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	legacyIDs, err := documentIDs(ctx, transaction, `SELECT source_id FROM docs WHERE status='active' AND origin_id='' AND source='transcripts' AND json_extract(metadata,'$.session_id')=?`, commit.SessionID)
 	if err != nil {
 		return err
 	}
-	var replacedIDs []string
-	for rows.Next() {
-		var sourceID string
-		if err := rows.Scan(&sourceID); err != nil {
-			rows.Close()
-			return err
-		}
-		replacedIDs = append(replacedIDs, sourceID)
-	}
-	if err := rows.Close(); err != nil {
+	if err := retireDocuments(ctx, transaction, legacyIDs, firstDocumentID(commit.Documents), now); err != nil {
 		return err
 	}
-	for _, sourceID := range replacedIDs {
-		if _, err := transaction.ExecContext(ctx, `UPDATE docs SET status='active',superseded_by='',superseded_at='',consolidation_reason='' WHERE source='transcripts' AND superseded_by=?`, sourceID); err != nil {
-			return err
-		}
-	}
-	if _, err := transaction.ExecContext(ctx, `DELETE FROM docs WHERE source='transcripts' AND json_extract(metadata,'$.session_id')=?`, commit.SessionID); err != nil {
+
+	if err := commitSourceTransaction(ctx, transaction, knowledge.SourceCommit{Source: commit.Source, Documents: commit.Documents, Supersessions: commit.Supersessions}); err != nil {
 		return err
-	}
-	for _, document := range commit.Documents {
-		if !document.HasValidScope() {
-			return fmt.Errorf("invalid knowledge scope %q for project %q", document.Scope, document.Project)
-		}
-		metadata, _ := json.Marshal(document.Metadata)
-		vector := encodeVector(document.Vector)
-		if document.Status == "" {
-			document.Status = knowledge.StatusActive
-		}
-		if _, err := transaction.ExecContext(ctx, upsertDocumentSQL,
-			document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, vector,
-			document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason); err != nil {
-			return err
-		}
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, supersession := range commit.Supersessions {
-		if supersession.LoserSourceID == supersession.WinnerSourceID {
-			return fmt.Errorf("knowledge record %q cannot supersede itself", supersession.LoserSourceID)
-		}
-		var winnerCount int
-		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs WHERE source='transcripts' AND source_id=?`, supersession.WinnerSourceID).Scan(&winnerCount); err != nil {
-			return err
-		}
-		if winnerCount != 1 {
-			return fmt.Errorf("supersession winner %q not found", supersession.WinnerSourceID)
-		}
-		result, err := transaction.ExecContext(ctx, `UPDATE docs SET status='superseded',superseded_by=?,superseded_at=?,consolidation_reason=? WHERE source='transcripts' AND source_id=?`,
-			supersession.WinnerSourceID, now, supersession.Reason, supersession.LoserSourceID)
-		if err != nil {
-			return err
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return fmt.Errorf("supersession loser %q not found", supersession.LoserSourceID)
-		}
 	}
 	if _, err := transaction.ExecContext(ctx, `INSERT INTO digested_sessions(session_id,transcript_hash,created_at) VALUES(?,?,?)
 ON CONFLICT(session_id) DO UPDATE SET transcript_hash=excluded.transcript_hash,created_at=excluded.created_at`, commit.SessionID, commit.TranscriptHash, now); err != nil {
@@ -226,8 +183,120 @@ ON CONFLICT(session_id) DO UPDATE SET transcript_hash=excluded.transcript_hash,c
 	return transaction.Commit()
 }
 
+func (repository *Repository) CommitSource(ctx context.Context, commit knowledge.SourceCommit) error {
+	transaction, err := repository.database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if err := commitSourceTransaction(ctx, transaction, commit); err != nil {
+		return err
+	}
+	return transaction.Commit()
+}
+
+func commitSourceTransaction(ctx context.Context, transaction *sql.Tx, commit knowledge.SourceCommit) error {
+	if err := validateSource(commit.Source); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO knowledge_sources(id,kind,source_key,provider,project,title,content,content_hash,created_at)
+VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, commit.Source.ID, commit.Source.Kind, commit.Source.Key, commit.Source.Provider, commit.Source.Project, commit.Source.Title, commit.Source.Content, commit.Source.ContentHash, commit.Source.CreatedAt); err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	priorIDs, err := documentIDs(ctx, transaction, `SELECT source_id FROM docs WHERE status='active' AND origin_id IN (SELECT id FROM knowledge_sources WHERE kind=? AND source_key=? AND project=? AND id<>?)`, commit.Source.Kind, commit.Source.Key, commit.Source.Project, commit.Source.ID)
+	if err != nil {
+		return err
+	}
+	if err := retireDocuments(ctx, transaction, priorIDs, firstDocumentID(commit.Documents), now); err != nil {
+		return err
+	}
+	for _, document := range commit.Documents {
+		if !document.HasValidScope() {
+			return fmt.Errorf("invalid knowledge scope %q for project %q", document.Scope, document.Project)
+		}
+		document.OriginID = commit.Source.ID
+		metadata, _ := json.Marshal(document.Metadata)
+		if document.Status == "" {
+			document.Status = knowledge.StatusActive
+		}
+		if _, err := transaction.ExecContext(ctx, upsertDocumentSQL,
+			document.Source, document.SourceID, document.TS, document.Title, document.Content, string(metadata), document.Kind, document.Area, document.Scope, document.Project, encodeVector(document.Vector),
+			document.Status, document.SupersededBy, document.SupersededAt, document.ConsolidationReason, document.OriginID); err != nil {
+			return err
+		}
+	}
+	return applySupersessions(ctx, transaction, commit.Supersessions, now)
+}
+
+func firstDocumentID(documents []knowledge.Document) string {
+	if len(documents) == 0 {
+		return ""
+	}
+	return documents[0].SourceID
+}
+
+func documentIDs(ctx context.Context, transaction *sql.Tx, query string, arguments ...any) ([]string, error) {
+	rows, err := transaction.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func retireDocuments(ctx context.Context, transaction *sql.Tx, ids []string, replacement, now string) error {
+	for _, id := range ids {
+		if _, err := transaction.ExecContext(ctx, `UPDATE docs SET status='active',superseded_by='',superseded_at='',consolidation_reason='' WHERE superseded_by=?`, id); err != nil {
+			return err
+		}
+		if _, err := transaction.ExecContext(ctx, `UPDATE docs SET status='superseded',superseded_by=?,superseded_at=?,consolidation_reason='source updated' WHERE source_id=?`, replacement, now, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSource(source knowledge.Source) error {
+	if source.ID == "" || source.Kind == "" || source.Key == "" || source.ContentHash == "" || source.CreatedAt == "" {
+		return errors.New("knowledge source is incomplete")
+	}
+	return nil
+}
+
+func applySupersessions(ctx context.Context, transaction *sql.Tx, supersessions []knowledge.Supersession, now string) error {
+	for _, supersession := range supersessions {
+		if supersession.LoserSourceID == supersession.WinnerSourceID {
+			return fmt.Errorf("knowledge record %q cannot supersede itself", supersession.LoserSourceID)
+		}
+		var winnerCount int
+		if err := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM docs WHERE source_id=?`, supersession.WinnerSourceID).Scan(&winnerCount); err != nil {
+			return err
+		}
+		if winnerCount != 1 {
+			return fmt.Errorf("supersession winner %q not found", supersession.WinnerSourceID)
+		}
+		result, err := transaction.ExecContext(ctx, `UPDATE docs SET status='superseded',superseded_by=?,superseded_at=?,consolidation_reason=? WHERE source_id=?`, supersession.WinnerSourceID, now, supersession.Reason, supersession.LoserSourceID)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("supersession loser %q not found", supersession.LoserSourceID)
+		}
+	}
+	return nil
+}
+
 func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowledge.Document, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason FROM docs WHERE embedding IS NOT NULL AND status='active'`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,embedding,status,superseded_by,superseded_at,consolidation_reason,origin_id FROM docs WHERE embedding IS NOT NULL AND status='active'`)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +306,7 @@ func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowle
 		var document knowledge.Document
 		var metadata string
 		var encodedVector []byte
-		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason); err != nil {
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &encodedVector, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason, &document.OriginID); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
@@ -259,6 +328,7 @@ func migrateSchema(database *sql.DB) error {
 		"superseded_by":        "TEXT NOT NULL DEFAULT ''",
 		"superseded_at":        "TEXT NOT NULL DEFAULT ''",
 		"consolidation_reason": "TEXT NOT NULL DEFAULT ''",
+		"origin_id":            "TEXT NOT NULL DEFAULT ''",
 	}
 	rows, err := database.Query(`PRAGMA table_info(docs)`)
 	if err != nil {
@@ -287,7 +357,9 @@ func migrateSchema(database *sql.DB) error {
 			return err
 		}
 	}
-	_, err = database.Exec(`CREATE INDEX IF NOT EXISTS docs_status_scope_project ON docs(status,scope,project)`)
+	_, err = database.Exec(`CREATE INDEX IF NOT EXISTS docs_status_scope_project ON docs(status,scope,project);
+CREATE INDEX IF NOT EXISTS docs_origin ON docs(origin_id);
+CREATE INDEX IF NOT EXISTS knowledge_sources_key ON knowledge_sources(kind,source_key,project);`)
 	return err
 }
 

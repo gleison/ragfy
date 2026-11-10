@@ -24,7 +24,7 @@ type recordingExtractor struct {
 
 func (extractor *recordingExtractor) Extract(_ context.Context, request Request) ([]knowledge.Document, error) {
 	extractor.request = request
-	return []knowledge.Document{{Kind: request.Source}}, nil
+	return []knowledge.Document{{Kind: request.Provider}}, nil
 }
 
 func (generator *responseGenerator) Generate(_ context.Context, prompt string) (string, error) {
@@ -64,7 +64,7 @@ func TestGenerativeConsolidatesOverlappingWindows(t *testing.T) {
 	generator := &responseGenerator{responses: responses}
 	extractor.generator = generator
 
-	documents, err := extractor.Extract(context.Background(), Request{SessionID: "windowed", Source: "codex", Project: "ragfy", Spine: spine})
+	documents, err := extractor.Extract(context.Background(), Request{SessionID: "windowed", Provider: "codex", Project: "ragfy", Spine: spine})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestGenerativeRetriesInvalidResponse(t *testing.T) {
 	validResponse := fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"area":"runtime","status":"current","evidence":%q,"visibility":"project"}],"preferences":[],"decisions":[]}`, evidence, evidence)
 	generator := &responseGenerator{responses: []string{"{", validResponse}}
 	extractor := NewGenerative(generator)
-	documents, err := extractor.Extract(context.Background(), Request{SessionID: "session", Source: "codex", Project: "ragfy", Spine: "USER: " + evidence})
+	documents, err := extractor.Extract(context.Background(), Request{SessionID: "session", Provider: "codex", Project: "ragfy", Spine: "USER: " + evidence})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestGenerativeRetriesInvalidResponse(t *testing.T) {
 	}
 	for _, want := range []string{
 		"invalid structured response",
-		"extraction source=codex windows=1 candidates=1 accepted=1 rejected=0",
+		"extraction provider=codex windows=1 candidates=1 accepted=1 rejected=0",
 		"candidates_by_kind=fact:1 accepted_by_kind=fact:1 accepted_by_scope=project:1 rejection_reasons=none",
 	} {
 		if !strings.Contains(logs.String(), want) {
@@ -108,7 +108,7 @@ func TestRouterSelectsExtractorByExplicitSource(t *testing.T) {
 	codex := &recordingExtractor{}
 	claude := &recordingExtractor{}
 	router := NewRouter(map[string]Extractor{"codex": codex, "claude": claude})
-	documents, err := router.Extract(context.Background(), Request{SessionID: "s1", Source: "claude", Spine: "content"})
+	documents, err := router.Extract(context.Background(), Request{SessionID: "s1", Provider: "claude", Spine: "content"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,20 @@ func TestRouterSelectsExtractorByExplicitSource(t *testing.T) {
 	if codex.request.SessionID != "" {
 		t.Fatalf("codex extractor was unexpectedly called: %#v", codex.request)
 	}
-	if _, err := router.Extract(context.Background(), Request{Source: "unknown"}); err == nil {
+	if _, err := router.Extract(context.Background(), Request{Provider: "unknown"}); err == nil {
 		t.Fatal("router accepted an unconfigured source")
+	}
+}
+
+func TestRouterDefaultsToCodexThenConfiguredProvider(t *testing.T) {
+	codex := &recordingExtractor{}
+	claude := &recordingExtractor{}
+	router := NewRouter(map[string]Extractor{"claude": claude, "codex": codex})
+	if source, err := router.ResolveProvider(""); err != nil || source != "codex" {
+		t.Fatalf("default source=%q err=%v", source, err)
+	}
+	router = NewRouter(map[string]Extractor{"claude": claude})
+	if source, err := router.ResolveProvider(""); err != nil || source != "claude" {
+		t.Fatalf("single source=%q err=%v", source, err)
 	}
 }

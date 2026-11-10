@@ -48,7 +48,7 @@ func (reconciler *Generative) Reconcile(ctx context.Context, request Request) ([
 }
 
 func reconciliationPrompt(request Request) string {
-	return fmt.Sprintf(`Reconcile newly extracted durable knowledge with active knowledge from earlier coding-assistant sessions. Return only a JSON object with one actions array. Each action must identify one new_source_id, one existing_source_id, and relation "duplicate" or "supersedes".
+	return fmt.Sprintf(`Reconcile newly extracted durable knowledge with active knowledge from earlier sources. Return only a JSON object with one actions array. Each action must identify one new_source_id, one existing_source_id, and relation "duplicate" or "supersedes".
 
 Use "duplicate" only when both records express the same durable claim. Use "supersedes" only when the new record gives a confirmed, incompatible newer state for the same subject and attribute. Do not emit actions for complementary knowledge, merely related subjects, uncertain conflicts, or independent problem occurrences. The application validates chronology, scope, project, kind, evidence, and acceptance separately. Prefer no action when uncertain. Never relate records with different kinds, scopes, or projects.
 

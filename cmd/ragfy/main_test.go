@@ -19,13 +19,13 @@ func TestCommandArgumentsHandlesDefaultStatusInvocation(t *testing.T) {
 func TestHelpDescribesSearchAndTextIngest(t *testing.T) {
 	var global bytes.Buffer
 	writeGlobalHelp(&global)
-	for _, expected := range []string{"Find stored memories", "save text directly", "ragfy help <command>"} {
+	for _, expected := range []string{"Find stored memories", "Extract durable knowledge", "ragfy help <command>"} {
 		if !strings.Contains(global.String(), expected) {
 			t.Fatalf("global help missing %q: %s", expected, global.String())
 		}
 	}
 	var ingest bytes.Buffer
-	if !writeCommandHelp(&ingest, "ingest") || !strings.Contains(ingest.String(), "--text") || !strings.Contains(ingest.String(), "generative session extraction") {
+	if !writeCommandHelp(&ingest, "ingest") || !strings.Contains(ingest.String(), "--text") || !strings.Contains(ingest.String(), "same pipeline as session digest") || !strings.Contains(ingest.String(), "only configured provider is selected automatically") {
 		t.Fatalf("ingest help = %q", ingest.String())
 	}
 }

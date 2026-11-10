@@ -21,7 +21,6 @@ import (
 	"unicode/utf8"
 
 	"ragfy/internal/api"
-	"ragfy/internal/chunking"
 	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
@@ -41,7 +40,6 @@ type Service struct {
 	extractor  extraction.Extractor
 	retriever  retrieval.Retriever
 	reconciler reconciliation.Reconciler
-	chunker    chunking.Chunker
 	queue      chan api.HookPayload
 	digestLock sync.Mutex
 	startedAt  time.Time
@@ -60,7 +58,6 @@ type Dependencies struct {
 	Extractor  extraction.Extractor
 	Retriever  retrieval.Retriever
 	Reconciler reconciliation.Reconciler
-	Chunker    chunking.Chunker
 	Runtime    RuntimeInfo
 }
 
@@ -79,7 +76,6 @@ func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service
 		extractor:  dependencies.Extractor,
 		retriever:  dependencies.Retriever,
 		reconciler: reconciler,
-		chunker:    dependencies.Chunker,
 		queue:      make(chan api.HookPayload, queueCapacity),
 		startedAt:  time.Now(),
 		runtime:    dependencies.Runtime,
@@ -212,7 +208,11 @@ func (service *Service) IngestPath(ctx context.Context, request api.IngestPayloa
 	if err != nil {
 		return 0, err
 	}
-	var documents []knowledge.Document
+	provider, err := service.resolveProvider(request.Provider)
+	if err != nil {
+		return 0, err
+	}
+	storedCount := 0
 	err = filepath.WalkDir(absoluteRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -240,20 +240,15 @@ func (service *Service) IngestPath(ctx context.Context, request api.IngestPayloa
 			return nil
 		}
 		title := strings.TrimSpace(strings.TrimSuffix(filepath.Base(path), extension))
-		for index, chunk := range service.chunker.Split(body) {
-			document := knowledge.Document{Source: "documents", SourceID: fmt.Sprintf("%x-%d", sha256.Sum256([]byte(path)), index), Title: title, Content: chunk, Area: "documents", Scope: knowledge.ScopeGlobal, Metadata: map[string]any{"path": path, "parent": path}}
-			if request.Project != "" {
-				document.Scope = knowledge.ScopeProject
-				document.Project = request.Project
-			}
-			documents = append(documents, document)
-		}
-		return nil
+		source := newKnowledgeSource("file", path, provider, request.Project, title, body, info.ModTime())
+		count, err := service.processSource(ctx, source)
+		storedCount += count
+		return err
 	})
 	if err != nil {
-		return 0, err
+		return storedCount, err
 	}
-	return service.storeDocuments(ctx, documents)
+	return storedCount, nil
 }
 
 func (service *Service) IngestText(ctx context.Context, request api.IngestPayload) (int, error) {
@@ -266,26 +261,15 @@ func (service *Service) IngestText(ctx context.Context, request api.IngestPayloa
 	if title == "" {
 		title = manualMemoryTitle(text)
 	}
-	identity := sha256.Sum256([]byte(project + "\x00" + title + "\x00" + text))
-	documents := make([]knowledge.Document, 0)
-	for index, chunk := range service.chunker.Split(text) {
-		document := knowledge.Document{
-			Source:   "manual",
-			SourceID: fmt.Sprintf("%x-%d", identity, index),
-			Title:    title,
-			Content:  chunk,
-			Kind:     "note",
-			Area:     "manual",
-			Scope:    knowledge.ScopeGlobal,
-			Metadata: map[string]any{"origin": "cli"},
-		}
-		if project != "" {
-			document.Scope = knowledge.ScopeProject
-			document.Project = project
-		}
-		documents = append(documents, document)
+	provider, err := service.resolveProvider(request.Provider)
+	if err != nil {
+		return 0, err
 	}
-	return service.storeDocuments(ctx, documents)
+	key := title
+	if strings.TrimSpace(request.Title) == "" {
+		key = SHA256Hex([]byte(text))
+	}
+	return service.processSource(ctx, newKnowledgeSource("manual", key, provider, project, title, text, time.Now()))
 }
 
 func manualMemoryTitle(text string) string {
@@ -298,29 +282,112 @@ func manualMemoryTitle(text string) string {
 	return strings.TrimSpace(string(runes[:77])) + "..."
 }
 
-func (service *Service) storeDocuments(ctx context.Context, documents []knowledge.Document) (int, error) {
-	storedCount := 0
-	for start := 0; start < len(documents); start += 32 {
-		end := min(start+32, len(documents))
-		texts := make([]string, end-start)
-		for index, document := range documents[start:end] {
-			texts[index] = document.Title + "\n" + document.Content
-		}
-		vectors, err := service.embedder.Embed(ctx, texts)
-		if err != nil {
-			return storedCount, err
-		}
-		for index := range vectors {
-			document := &documents[start+index]
-			document.Vector = vectors[index]
-			document.TS = time.Now().UTC().Format(time.RFC3339)
-			if err := service.repository.Upsert(ctx, *document); err != nil {
-				return storedCount, err
-			}
-			storedCount++
-		}
+func newKnowledgeSource(kind, key, provider, project, title, content string, createdAt time.Time) knowledge.Source {
+	contentHash := SHA256Hex([]byte(content))
+	return knowledge.Source{
+		ID:          SHA256Hex([]byte(kind + "\x00" + key + "\x00" + provider + "\x00" + project + "\x00" + contentHash)),
+		Kind:        kind,
+		Key:         key,
+		Provider:    provider,
+		Project:     project,
+		Title:       title,
+		Content:     content,
+		ContentHash: contentHash,
+		CreatedAt:   createdAt.UTC().Format(time.RFC3339Nano),
 	}
-	return storedCount, nil
+}
+
+type providerResolver interface {
+	ResolveProvider(string) (string, error)
+}
+
+func (service *Service) resolveProvider(requested string) (string, error) {
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	if resolver, ok := service.extractor.(providerResolver); ok {
+		return resolver.ResolveProvider(requested)
+	}
+	if requested == "" {
+		return "codex", nil
+	}
+	return requested, nil
+}
+
+func (service *Service) processSource(ctx context.Context, source knowledge.Source) (int, error) {
+	alreadyProcessed, err := service.repository.HasSource(ctx, source.ID)
+	if err != nil || alreadyProcessed {
+		return 0, err
+	}
+	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: source.ID, Provider: source.Provider, Project: source.Project, Spine: source.Content, Kind: source.Kind, Title: source.Title})
+	if err != nil {
+		return 0, err
+	}
+	if err := service.prepareDocuments(ctx, documents, source); err != nil {
+		return 0, err
+	}
+	stored, err := service.repository.Documents(ctx)
+	if err != nil {
+		return 0, err
+	}
+	candidates := reconciliationCandidates(documents, stored, source)
+	actions, err := service.reconciler.Reconcile(ctx, reconciliation.Request{SessionID: source.ID, Provider: source.Provider, Project: source.Project, New: documents, Existing: candidates})
+	if err != nil {
+		return 0, err
+	}
+	supersessions := resolveSupersessions(actions, documents, candidates)
+	if err := service.repository.CommitSource(ctx, knowledge.SourceCommit{Source: source, Documents: documents, Supersessions: supersessions}); err != nil {
+		return 0, err
+	}
+	log.Printf("ingest %s: source=%s stored=%d reconciliation_candidates=%d superseded=%d", source.ID, source.Kind, len(documents), len(candidates), len(supersessions))
+	return len(documents), nil
+}
+
+func (service *Service) prepareDocuments(ctx context.Context, documents []knowledge.Document, source knowledge.Source) error {
+	if len(documents) == 0 {
+		return nil
+	}
+	texts := make([]string, len(documents))
+	for index, document := range documents {
+		texts[index] = document.Title + "\n" + document.Content
+	}
+	vectors, err := service.embedder.Embed(ctx, texts)
+	if err != nil {
+		return err
+	}
+	if len(vectors) != len(documents) {
+		return fmt.Errorf("expected %d embeddings, got %d", len(documents), len(vectors))
+	}
+	for index := range documents {
+		document := &documents[index]
+		document.Vector = vectors[index]
+		document.TS = source.CreatedAt
+		document.Status = knowledge.StatusActive
+		document.OriginID = source.ID
+		if document.Metadata == nil {
+			document.Metadata = make(map[string]any)
+		}
+		document.Metadata["origin_kind"] = source.Kind
+		document.Metadata["origin_project"] = source.Project
+		document.Metadata["source_key"] = source.Key
+		document.Metadata["content_hash"] = source.ContentHash
+		document.Metadata["agent_source"] = source.Provider
+		if source.Kind == "file" {
+			document.Metadata["path"] = source.Key
+		}
+		if source.Kind == "manual" {
+			document.Metadata["origin"] = "cli"
+		}
+		if source.Kind == "session" {
+			document.Metadata["session_id"] = source.Key
+			document.Metadata["transcript_hash"] = source.ContentHash
+		}
+		if document.Scope == knowledge.ScopeProject {
+			document.Project = source.Project
+		} else {
+			document.Project = ""
+		}
+		document.SourceID = SHA256Hex([]byte(source.ID + "\n" + string(document.Scope) + "\n" + document.Project + "\n" + document.Kind + "\n" + document.Content))
+	}
+	return nil
 }
 
 func (service *Service) worker(ctx context.Context) {
@@ -397,7 +464,7 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	if err != nil {
 		return err
 	}
-	sessionTimestamp := digest.TranscriptTimestamp(transcript, info.ModTime()).Format(time.RFC3339Nano)
+	sessionTimestamp := digest.TranscriptTimestamp(transcript, info.ModTime())
 	service.digestLock.Lock()
 	defer service.digestLock.Unlock()
 	sessionID := payload.SessionID
@@ -413,53 +480,33 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 		return nil
 	}
 	spine := digest.TranscriptSpine(transcript)
+	project := projectName(payload.CWD)
+	source := newKnowledgeSource("session", sessionID, payload.Source, project, "Session "+sessionID, spine, sessionTimestamp)
 	if len(spine) < minimumSpineCharacters {
 		log.Printf("digest %s: skipped extraction spine_characters=%d minimum=%d stored=0", sessionID, len(spine), minimumSpineCharacters)
-		return service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash})
+		return service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash, Source: source})
 	}
-	project := projectName(payload.CWD)
-	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Source: payload.Source, Project: project, Spine: spine})
+	documents, err := service.extractor.Extract(ctx, extraction.Request{SessionID: sessionID, Provider: payload.Source, Project: project, Spine: spine})
 	if err != nil {
 		return err
 	}
-	texts := make([]string, len(documents))
-	for index, document := range documents {
-		texts[index] = document.Title + "\n" + document.Content
-	}
-	vectors, err := service.embedder.Embed(ctx, texts)
-	if err != nil {
+	if err := service.prepareDocuments(ctx, documents, source); err != nil {
 		return err
 	}
 	for index := range documents {
-		document := &documents[index]
-		document.Vector = vectors[index]
-		document.TS = sessionTimestamp
-		document.Status = knowledge.StatusActive
-		if document.Metadata == nil {
-			document.Metadata = make(map[string]any)
-		}
-		document.Metadata["origin_project"] = project
-		document.Metadata["agent_source"] = payload.Source
-		document.Metadata["session_id"] = sessionID
-		document.Metadata["transcript_hash"] = transcriptHash
-		if document.Scope == knowledge.ScopeProject {
-			document.Project = project
-		} else {
-			document.Project = ""
-		}
-		document.SourceID = SHA256Hex([]byte(sessionID + "\n" + string(document.Scope) + "\n" + document.Project + "\n" + document.Kind + "\n" + document.Content))
+		documents[index].Metadata["transcript_hash"] = transcriptHash
 	}
 	stored, err := service.repository.Documents(ctx)
 	if err != nil {
 		return err
 	}
-	candidates := reconciliationCandidates(documents, stored, sessionID)
-	actions, err := service.reconciler.Reconcile(ctx, reconciliation.Request{SessionID: sessionID, Source: payload.Source, Project: project, New: documents, Existing: candidates})
+	candidates := reconciliationCandidates(documents, stored, source)
+	actions, err := service.reconciler.Reconcile(ctx, reconciliation.Request{SessionID: sessionID, Provider: payload.Source, Project: project, New: documents, Existing: candidates})
 	if err != nil {
 		return err
 	}
 	supersessions := resolveSupersessions(actions, documents, candidates)
-	if err := service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash, Documents: documents, Supersessions: supersessions}); err != nil {
+	if err := service.repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: sessionID, TranscriptHash: transcriptHash, Source: source, Documents: documents, Supersessions: supersessions}); err != nil {
 		return err
 	}
 	log.Printf("digest %s: stored=%d reconciliation_candidates=%d superseded=%d", sessionID, len(documents), len(candidates), len(supersessions))
@@ -476,10 +523,10 @@ type scoredDocument struct {
 	score    float64
 }
 
-func reconciliationCandidates(newDocuments, stored []knowledge.Document, sessionID string) []knowledge.Document {
+func reconciliationCandidates(newDocuments, stored []knowledge.Document, source knowledge.Source) []knowledge.Document {
 	replaced := make(map[string]bool)
 	for _, document := range stored {
-		if metadataString(document.Metadata, "session_id") == sessionID {
+		if sameSourceLineage(document, source) {
 			replaced[document.SourceID] = true
 		}
 	}
@@ -490,7 +537,7 @@ func reconciliationCandidates(newDocuments, stored []knowledge.Document, session
 		}
 		var scored []scoredDocument
 		for _, existing := range stored {
-			if existing.Source != "transcripts" || metadataString(existing.Metadata, "session_id") == sessionID || existing.Kind == "problem" {
+			if existing.Source != "transcripts" || sameSourceLineage(existing, source) || existing.Kind == "problem" {
 				continue
 			}
 			active := existing.Status == "" || existing.Status == knowledge.StatusActive || replaced[existing.SupersededBy]
@@ -513,6 +560,18 @@ func reconciliationCandidates(newDocuments, stored []knowledge.Document, session
 	}
 	sort.Slice(result, func(first, second int) bool { return result[first].SourceID < result[second].SourceID })
 	return result
+}
+
+func sameSourceLineage(document knowledge.Document, source knowledge.Source) bool {
+	key := metadataString(document.Metadata, "source_key")
+	if key == "" {
+		sessionID := metadataString(document.Metadata, "session_id")
+		if source.Kind == "session" && sessionID == source.Key {
+			return true
+		}
+		key = sessionID
+	}
+	return key == source.Key && metadataString(document.Metadata, "origin_project") == source.Project
 }
 
 func resolveSupersessions(actions []reconciliation.Action, newDocuments, existingDocuments []knowledge.Document) []knowledge.Supersession {

@@ -20,9 +20,9 @@ func NewRouter(reconcilers map[string]Reconciler) *Router {
 }
 
 func (router *Router) Reconcile(ctx context.Context, request Request) ([]Action, error) {
-	reconciler, ok := router.reconcilers[request.Source]
+	reconciler, ok := router.reconcilers[request.Provider]
 	if !ok || reconciler == nil {
-		return nil, fmt.Errorf("no knowledge reconciler configured for source %q", request.Source)
+		return nil, fmt.Errorf("no knowledge reconciler configured for provider %q", request.Provider)
 	}
 	return reconciler.Reconcile(ctx, request)
 }

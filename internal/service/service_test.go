@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"ragfy/internal/api"
-	"ragfy/internal/chunking"
 	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
 	"ragfy/internal/knowledge"
@@ -107,7 +106,6 @@ func newTestService(repository knowledge.Repository, corpus retrieval.Corpus, mo
 		Embedder:   models,
 		Extractor:  extraction.NewGenerative(models),
 		Retriever:  retrieval.NewHybrid(corpus),
-		Chunker:    chunking.NewText(1200, 160),
 	}, queueCapacity)
 }
 
@@ -259,6 +257,10 @@ func groundedFactJSON(fact, evidence string) string {
 	return fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"area":"runtime","status":"current","evidence":%q,"visibility":"project"}],"preferences":[],"decisions":[]}`, fact, evidence)
 }
 
+func groundedGlobalFactJSON(fact, evidence string) string {
+	return fmt.Sprintf(`{"problems":[],"facts":[{"fact":%q,"area":"runtime","status":"current","evidence":%q,"visibility":"global"}],"preferences":[],"decisions":[]}`, fact, evidence)
+}
+
 func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
@@ -292,11 +294,15 @@ func TestDigestEndToEndDeduplicatesAndReplacesSessionKnowledge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 1 || !strings.Contains(docs[0].Content, "SQLite repository") {
+	if len(docs) != 2 || docs[0].Status != knowledge.StatusSuperseded || docs[1].Status != knowledge.StatusActive || !strings.Contains(docs[1].Content, "SQLite repository") {
 		t.Fatalf("session knowledge was not replaced: %#v", docs)
 	}
-	if docs[0].Scope != knowledge.ScopeProject || docs[0].Project != "ragfy" || docs[0].Metadata["session_id"] != "session-1" || docs[0].Metadata["origin_project"] != "ragfy" || docs[0].Metadata["agent_source"] != "codex" || docs[0].Metadata["evidence"] != secondEvidence {
-		t.Fatalf("missing digest metadata: %#v", docs[0].Metadata)
+	if docs[1].Scope != knowledge.ScopeProject || docs[1].Project != "ragfy" || docs[1].Metadata["session_id"] != "session-1" || docs[1].Metadata["origin_project"] != "ragfy" || docs[1].Metadata["agent_source"] != "codex" || docs[1].Metadata["evidence"] != secondEvidence {
+		t.Fatalf("missing digest metadata: %#v", docs[1].Metadata)
+	}
+	sources, err := repo.Sources(ctx)
+	if err != nil || len(sources) != 2 || sources[0].Kind != "session" || !strings.Contains(sources[1].Content, secondEvidence) {
+		t.Fatalf("session sources were not preserved: %#v err=%v", sources, err)
 	}
 }
 
@@ -566,8 +572,8 @@ func TestDigestShortTranscriptClearsOldSessionWithoutLoadingModel(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 0 {
-		t.Fatalf("old session knowledge survived: %#v", docs)
+	if len(docs) != 1 || docs[0].Status != knowledge.StatusSuperseded {
+		t.Fatalf("old session knowledge was not retired: %#v", docs)
 	}
 	if done, err := repo.HasSession(ctx, "short-session", SHA256Hex(data)); err != nil || !done {
 		t.Fatalf("short session not marked: done=%v err=%v", done, err)
@@ -592,7 +598,8 @@ func TestHTTPHandlersRejectInvalidPayloads(t *testing.T) {
 func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	models := &fakeModelEngine{}
+	evidence := "Ragfy documentation paragraph."
+	models := &fakeModelEngine{generated: []string{groundedGlobalFactJSON("Ragfy has durable documentation.", evidence)}}
 	service := newTestService(repo, repo, models, defaultQueueCapacity)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(strings.Repeat("Ragfy documentation paragraph. ", 60)), 0600); err != nil {
@@ -605,8 +612,8 @@ func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count < 2 {
-		t.Fatalf("ingested %d chunks, want at least 2", count)
+	if count != 1 {
+		t.Fatalf("ingested %d records, want 1", count)
 	}
 	docs, err := repo.Documents(ctx)
 	if err != nil {
@@ -616,16 +623,21 @@ func TestIngestPathReadsSupportedFilesAndStoresChunks(t *testing.T) {
 		t.Fatalf("stored %d documents, count=%d", len(docs), count)
 	}
 	for _, doc := range docs {
-		if doc.Title != "README" || doc.Scope != knowledge.ScopeGlobal || doc.Project != "" || doc.Metadata["path"] != filepath.Join(root, "README.md") {
+		if doc.Scope != knowledge.ScopeGlobal || doc.Project != "" || doc.Metadata["path"] != filepath.Join(root, "README.md") || doc.Metadata["origin_kind"] != "file" {
 			t.Fatalf("unexpected ingested document: %#v", doc)
 		}
+	}
+	sources, err := repo.Sources(ctx)
+	if err != nil || len(sources) != 1 || sources[0].Title != "README" || !strings.Contains(sources[0].Content, evidence) {
+		t.Fatalf("file source was not preserved: %#v err=%v", sources, err)
 	}
 }
 
 func TestIngestPathCanRestrictDocumentsToProject(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	service := newTestService(repo, repo, &fakeModelEngine{}, defaultQueueCapacity)
+	evidence := "Project-specific architecture and implementation details."
+	service := newTestService(repo, repo, &fakeModelEngine{generated: []string{groundedFactJSON(evidence, evidence)}}, defaultQueueCapacity)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "architecture.md"), []byte("Project-specific architecture and implementation details."), 0600); err != nil {
 		t.Fatal(err)
@@ -645,7 +657,7 @@ func TestIngestPathCanRestrictDocumentsToProject(t *testing.T) {
 func TestIngestTextStoresManualProjectMemory(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
-	service := newTestService(repo, repo, &fakeModelEngine{}, defaultQueueCapacity)
+	service := newTestService(repo, repo, &fakeModelEngine{generated: []string{groundedFactJSON("Production uses PostgreSQL 17.", "Production uses PostgreSQL 17.")}}, defaultQueueCapacity)
 	payload := api.IngestPayload{Text: "Production uses PostgreSQL 17.", Title: "Production database", Project: " ragfy "}
 	count, err := service.IngestText(ctx, payload)
 	if err != nil {
@@ -659,8 +671,49 @@ func TestIngestTextStoresManualProjectMemory(t *testing.T) {
 		t.Fatalf("count=%d documents=%#v", count, documents)
 	}
 	document := documents[0]
-	if document.Source != "manual" || document.Title != "Production database" || document.Content != payload.Text || document.Scope != knowledge.ScopeProject || document.Project != "ragfy" {
+	if document.Source != "transcripts" || !strings.Contains(document.Content, payload.Text) || document.Scope != knowledge.ScopeProject || document.Project != "ragfy" || document.Metadata["origin_kind"] != "manual" {
 		t.Fatalf("manual document = %#v", document)
+	}
+	sources, err := repo.Sources(ctx)
+	if err != nil || len(sources) != 1 || sources[0].Title != "Production database" || sources[0].Content != payload.Text {
+		t.Fatalf("manual source was not preserved: %#v err=%v", sources, err)
+	}
+}
+
+func TestIngestTextIsIdempotentAndPreservesChangedSourceVersions(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	first := "Production uses PostgreSQL 17."
+	second := "Production uses PostgreSQL 18."
+	models := &fakeModelEngine{generated: []string{groundedFactJSON(first, first), groundedFactJSON(second, second)}}
+	service := newTestService(repo, repo, models, defaultQueueCapacity)
+
+	request := api.IngestPayload{Text: first, Title: "Production database", Project: "ragfy"}
+	if count, err := service.IngestText(ctx, request); err != nil || count != 1 {
+		t.Fatalf("first ingest count=%d err=%v", count, err)
+	}
+	if count, err := service.IngestText(ctx, request); err != nil || count != 0 {
+		t.Fatalf("unchanged ingest count=%d err=%v", count, err)
+	}
+	request.Text = second
+	if count, err := service.IngestText(ctx, request); err != nil || count != 1 {
+		t.Fatalf("changed ingest count=%d err=%v", count, err)
+	}
+	if models.generateCalls != 2 {
+		t.Fatalf("generate calls=%d, want 2", models.generateCalls)
+	}
+
+	sources, err := repo.Sources(ctx)
+	if err != nil || len(sources) != 2 || sources[0].Content != first || sources[1].Content != second {
+		t.Fatalf("preserved sources=%#v err=%v", sources, err)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil || len(documents) != 2 || documents[0].Status != knowledge.StatusSuperseded || documents[1].Status != knowledge.StatusActive {
+		t.Fatalf("versioned documents=%#v err=%v", documents, err)
+	}
+	hits, err := retrieval.NewHybrid(repo).Search(ctx, retrieval.Query{Text: "PostgreSQL", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
+	if err != nil || len(hits) != 1 || !strings.Contains(hits[0].Doc.Content, "18") {
+		t.Fatalf("search hits=%#v err=%v", hits, err)
 	}
 }
 

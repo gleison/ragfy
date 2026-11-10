@@ -274,6 +274,7 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 		fmt.Fprintln(writer, "\nKnowledge")
 		fmt.Fprintf(writer, "  Active records       %d\n", report.Health.Knowledge.ActiveRecords)
 		fmt.Fprintf(writer, "  Superseded records   %d\n", report.Health.Knowledge.SupersededRecords)
+		fmt.Fprintf(writer, "  Preserved sources    %d\n", report.Health.Knowledge.PreservedSources)
 		fmt.Fprintf(writer, "  Digested sessions    %d\n", report.Health.Knowledge.DigestedSessions)
 		fmt.Fprintf(writer, "  Projects             %d\n", report.Health.Knowledge.Projects)
 	}

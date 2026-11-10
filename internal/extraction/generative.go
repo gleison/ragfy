@@ -36,7 +36,11 @@ func (extractor *Generative) Extract(ctx context.Context, request Request) ([]kn
 	responses := make([]string, 0, len(windows))
 	for index, window := range windows {
 		label := fmt.Sprintf("window %d/%d", index+1, len(windows))
-		response, err := extractor.generateJSON(ctx, request.SessionID, label, digest.Prompt(request.Project, window), window)
+		prompt := digest.Prompt(request.Project, window)
+		if request.Kind != "" && request.Kind != "session" {
+			prompt = digest.SourcePrompt(request.Project, request.Kind, request.Title, window)
+		}
+		response, err := extractor.generateJSON(ctx, request.SessionID, label, prompt, window)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +49,7 @@ func (extractor *Generative) Extract(ctx context.Context, request Request) ([]kn
 
 	response := responses[0]
 	if len(responses) > 1 {
-		log.Printf("digest %s: consolidating extraction source=%s windows=%d spine_characters=%d", request.SessionID, request.Source, len(responses), len(request.Spine))
+		log.Printf("digest %s: consolidating extraction provider=%s windows=%d spine_characters=%d", request.SessionID, request.Provider, len(responses), len(request.Spine))
 		var err error
 		response, err = extractor.generateJSON(ctx, request.SessionID, "consolidation", digest.ConsolidationPrompt(request.Project, responses), request.Spine)
 		if err != nil {
@@ -57,7 +61,7 @@ func (extractor *Generative) Extract(ctx context.Context, request Request) ([]kn
 	if err != nil {
 		return nil, fmt.Errorf("validate final digest response: %w", err)
 	}
-	log.Printf("digest %s: extraction source=%s windows=%d %s", request.SessionID, request.Source, len(windows), audit.Summary())
+	log.Printf("digest %s: extraction provider=%s windows=%d %s", request.SessionID, request.Provider, len(windows), audit.Summary())
 	return documents, nil
 }
 

@@ -15,7 +15,7 @@ const (
 
 type Request struct {
 	SessionID string
-	Source    string
+	Provider  string
 	Project   string
 	New       []knowledge.Document
 	Existing  []knowledge.Document

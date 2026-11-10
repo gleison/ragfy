@@ -6,8 +6,13 @@ CREATE TABLE IF NOT EXISTS docs (
  ts TEXT, title TEXT, content TEXT NOT NULL, metadata TEXT, kind TEXT, area TEXT,
  scope TEXT NOT NULL, project TEXT NOT NULL, embedding BLOB,
  status TEXT NOT NULL DEFAULT 'active', superseded_by TEXT NOT NULL DEFAULT '',
- superseded_at TEXT NOT NULL DEFAULT '', consolidation_reason TEXT NOT NULL DEFAULT '',
+ superseded_at TEXT NOT NULL DEFAULT '', consolidation_reason TEXT NOT NULL DEFAULT '', origin_id TEXT NOT NULL DEFAULT '',
  UNIQUE(source,source_id));
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+ id TEXT PRIMARY KEY, kind TEXT NOT NULL, source_key TEXT NOT NULL, provider TEXT NOT NULL DEFAULT '',
+ project TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL,
+ content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+ UNIQUE(kind,source_key,content_hash,provider,project));
 CREATE TABLE IF NOT EXISTS digested_sessions (
  session_id TEXT PRIMARY KEY, transcript_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS app_metadata (

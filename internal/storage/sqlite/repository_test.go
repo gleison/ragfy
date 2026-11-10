@@ -5,10 +5,15 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"ragfy/internal/knowledge"
 	"ragfy/internal/retrieval"
 )
+
+func testSource(id, kind, key string) knowledge.Source {
+	return knowledge.Source{ID: id, Kind: kind, Key: key, Content: "source content " + id, ContentHash: "hash-" + id, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+}
 
 func TestOpenMigratesExistingRagfyDatabaseForSupersession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.sqlite")
@@ -66,14 +71,14 @@ func TestRepositoryStatistics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: "session", TranscriptHash: "hash"}); err != nil {
+	if err := repository.CommitSession(ctx, knowledge.SessionCommit{SessionID: "session", TranscriptHash: "hash", Source: testSource("session-source", "session", "session")}); err != nil {
 		t.Fatal(err)
 	}
 	statistics, err := repository.Statistics(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if statistics.ActiveRecords != 1 || statistics.SupersededRecords != 1 || statistics.DigestedSessions != 1 || statistics.Projects != 1 {
+	if statistics.ActiveRecords != 1 || statistics.SupersededRecords != 1 || statistics.DigestedSessions != 1 || statistics.PreservedSources != 1 || statistics.Projects != 1 {
 		t.Fatalf("statistics = %#v", statistics)
 	}
 }
@@ -143,7 +148,7 @@ func TestSQLiteRepositoryRejectsInvalidScope(t *testing.T) {
 	}
 }
 
-func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
+func TestSQLiteRepositorySessionDeduplicationAndScopedRetirement(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)
 	for _, doc := range []knowledge.Document{
@@ -159,7 +164,7 @@ func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 	if done, err := repo.HasSession(ctx, "s1", "hash-a"); err != nil || done {
 		t.Fatalf("unmarked session done=%v err=%v", done, err)
 	}
-	if _, err := repo.MarkSession(ctx, "s1", "hash-a"); err != nil {
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "s1", TranscriptHash: "hash-a", Source: testSource("s1-source", "session", "s1")}); err != nil {
 		t.Fatal(err)
 	}
 	if done, err := repo.HasSession(ctx, "s1", "hash-a"); err != nil || !done {
@@ -169,19 +174,19 @@ func TestSQLiteRepositorySessionDeduplicationAndScopedDeletion(t *testing.T) {
 		t.Fatalf("changed transcript done=%v err=%v", done, err)
 	}
 
-	if err := repo.DeleteSessionDocs(ctx, "s1"); err != nil {
-		t.Fatal(err)
-	}
 	docs, err := repo.Documents(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 2 {
-		t.Fatalf("scoped deletion left %d docs, want 2: %#v", len(docs), docs)
+	if len(docs) != 3 {
+		t.Fatalf("scoped retirement left %d docs, want 3: %#v", len(docs), docs)
 	}
 	for _, doc := range docs {
-		if doc.SourceID == "s1-doc" {
-			t.Fatalf("session s1 transcript survived deletion: %#v", docs)
+		if doc.SourceID == "s1-doc" && doc.Status != knowledge.StatusSuperseded {
+			t.Fatalf("session s1 transcript remained active: %#v", docs)
+		}
+		if doc.SourceID != "s1-doc" && doc.Status == knowledge.StatusSuperseded {
+			t.Fatalf("unrelated document was retired: %#v", docs)
 		}
 	}
 }
@@ -220,7 +225,7 @@ func TestSQLiteCommitSessionIsAtomicAndRestoresReplacedWinnerDependents(t *testi
 	}
 	invalid := knowledge.Document{Source: "transcripts", SourceID: "new", Title: "new", Content: "new", Scope: knowledge.ScopeProject, Project: "ragfy", Metadata: map[string]any{"session_id": "replace"}, Vector: []float32{1}}
 	err := repo.CommitSession(ctx, knowledge.SessionCommit{
-		SessionID: "replace", TranscriptHash: "hash-b", Documents: []knowledge.Document{invalid},
+		SessionID: "replace", TranscriptHash: "hash-b", Source: testSource("replace-b", "session", "replace"), Documents: []knowledge.Document{invalid},
 		Supersessions: []knowledge.Supersession{{LoserSourceID: "missing", WinnerSourceID: "new", Reason: "supersedes"}},
 	})
 	if err == nil {
@@ -234,14 +239,14 @@ func TestSQLiteCommitSessionIsAtomicAndRestoresReplacedWinnerDependents(t *testi
 		t.Fatalf("failed transaction changed documents: %#v", stored)
 	}
 
-	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "replace", TranscriptHash: "hash-c", Documents: []knowledge.Document{invalid}}); err != nil {
+	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "replace", TranscriptHash: "hash-c", Source: testSource("replace-c", "session", "replace"), Documents: []knowledge.Document{invalid}}); err != nil {
 		t.Fatal(err)
 	}
 	stored, err = repo.Documents(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored) != 2 || stored[0].SourceID != "dependent" || stored[0].Status != knowledge.StatusActive || stored[1].SourceID != "new" {
+	if len(stored) != 3 || stored[0].SourceID != "winner" || stored[0].Status != knowledge.StatusSuperseded || stored[1].SourceID != "dependent" || stored[1].Status != knowledge.StatusActive || stored[2].SourceID != "new" {
 		t.Fatalf("replacement did not restore dependent: %#v", stored)
 	}
 }

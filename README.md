@@ -47,11 +47,12 @@ ragfy search "How is authentication configured?"
 ragfy ingest ~/Documents/Knowledge
 ragfy ingest --project ragfy ./docs
 ragfy ingest --text "Production uses PostgreSQL 17."
+ragfy ingest --provider claude --text "Production uses PostgreSQL 17."
 ```
 
 `setup` is an interactive wizard. It suggests the default embedding model, lets you enter another GGUF model URI, and lets you select Codex, Claude Code, or both. It validates the selected CLI and embedding model, saves the configuration, reconciles the selected hooks, registers a user-level service (LaunchAgent on macOS, systemd on Linux, or a logon task on Windows), and waits until the service reports healthy. The service listens only on `127.0.0.1` and protects its API with a local token.
 
-`status` combines local installation checks with live service information. It reports the binary and data paths, service registration and health, model cache, selected integrations and hooks, queue depth, active and superseded knowledge, digested sessions, and project count. `--json` provides the same report for automation.
+`status` combines local installation checks with live service information. It reports the binary and data paths, service registration and health, model cache, selected integrations and hooks, queue depth, active and superseded knowledge, preserved sources, digested sessions, and project count. `--json` provides the same report for automation.
 
 `update` downloads the current installer over HTTPS and asks it to replace a direct installation in the same prefix. Homebrew-managed installations are left to `brew upgrade ragfy`.
 
@@ -59,7 +60,7 @@ ragfy ingest --text "Production uses PostgreSQL 17."
 
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 
-`ingest` indexes `.md`, `.rst`, and `.txt` files as global knowledge by default. It can also store a phrase or note directly with `--text`, optionally using `--title`. Pass `--project <name>` to restrict ingested knowledge to that project. Ingest chunks and embeds content locally; unlike the `SessionEnd` digest hook, it does not run generative extraction over a conversation transcript. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
+`ingest` processes `.md`, `.rst`, and `.txt` files as global knowledge by default. It can also process a phrase or note directly with `--text`, optionally using `--title`. Pass `--project <name>` to restrict extracted knowledge to that project. Files, manual text, and session digests all use the same extraction, evidence validation, reconciliation, embedding, and persistence pipeline. When both integrations are configured, ingest prefers Codex; `--provider codex|claude` selects one explicitly. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
 
 ## Models and local data
 
@@ -69,7 +70,9 @@ By default, the setup wizard downloads the following embedding GGUF model to the
 
 This model is the setup wizard's recommended preset. A custom `hf://` or `https://` GGUF URI can be entered instead. Ragfy verifies that the file is GGUF, loads it in embedding mode, generates test vectors, and checks their dimensions and numeric values before saving the choice. The known Qwen preset uses its published SHA-256, `last` pooling, and its retrieval query instruction. For a custom model, Ragfy uses the pooling declared by the model, applies no query instruction, and pins the downloaded file's SHA-256 for subsequent starts.
 
-Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Ingested documents, embeddings, and recall stay local. Codex session transcripts are extracted with `codex exec`; Claude session transcripts are extracted with `claude -p`. Both run without tools, hooks, workspace writes, or session persistence. Extraction uses the full clean conversational spine by default. Oversized spines are split at message boundaries with overlap, then the candidates are consolidated and validated against the complete conversation. After extraction, the same provider reconciles semantically close records from earlier sessions. Confirmed newer states supersede older ones, while ambiguous or complementary records remain active. Superseded records are retained for audit but excluded from recall.
+Qwen3-Embedding supports more than 100 languages. Ragfy uses an English retrieval instruction for queries and requires `last` pooling, as specified by the official GGUF. Its weights stay in the local cache while the service is running. Source content, extracted knowledge, embeddings, and recall stay local. Codex sources are processed with `codex exec`; Claude sources are processed with `claude -p`. Both run without tools, hooks, workspace writes, or agent-session persistence. Extraction uses the complete normalized source by default. Oversized sources are windowed with overlap, then candidates are consolidated and validated against the complete content. After extraction, the same provider reconciles semantically close records from earlier sources. Confirmed newer states supersede older ones, while ambiguous or complementary records remain active. Superseded records are retained for audit but excluded from recall.
+
+Ragfy preserves each normalized source version in the same SQLite database: the clean conversational spine for a session, the text of a supported file, or text supplied manually. Extracted memories reference their source version. Reprocessing unchanged content is idempotent; changed content creates a new source version and retires the previous derived memories without deleting either the previous source or its extracted records. Raw sources are never included directly in search results.
 
 SQLite is created as `memory.sqlite` in Ragfy's application data directory:
 
@@ -83,7 +86,8 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 
 ```text
 UserPromptSubmit -> provider hook -> local service -> local embeddings + hybrid search -> context
-SessionEnd       -> provider hook -> digestion queue -> extraction -> embedding -> cross-session reconciliation -> SQLite
+SessionEnd       -> provider hook -> digestion queue -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
+ingest           -> file or text -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ```
 
 The Go source follows the standard command-plus-internal-packages layout:
@@ -91,9 +95,8 @@ The Go source follows the standard command-plus-internal-packages layout:
 ```text
 cmd/ragfy                 executable composition
 internal/api              hook transport contract
-internal/chunking         replaceable document splitting
 internal/extraction       replaceable knowledge extraction
-internal/reconciliation   replaceable cross-session knowledge reconciliation
+internal/reconciliation   replaceable cross-source knowledge reconciliation
 internal/knowledge        persistence contract and domain types
 internal/storage/sqlite   SQLite adapter and schema
 internal/model            generation and embedding contracts, plus llama.cpp
@@ -105,7 +108,7 @@ internal/platform         operating-system integration
 internal/settings         process-level constants
 ```
 
-Generation, embedding, chunking, extraction, reconciliation and retrieval are injected independently. The default composition routes Codex and Claude transcripts to generators backed by their respective CLIs, while Qwen provides local embeddings. Alternative generators, embedders, extractors, reconcilers, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Reconciliation compares only compatible records in the same scope and project, uses transcript chronology rather than processing order, and commits session replacement plus supersession links atomically. Recall combines global knowledge with knowledge belonging to the current working-directory project, excludes other projects, and ignores superseded records.
+Generation, embedding, extraction, reconciliation and retrieval are injected independently. The default composition routes sources to generators backed by the configured Codex or Claude CLI, while Qwen provides local embeddings. Alternative generators, embedders, extractors, reconcilers, or database-native retrievers can replace one capability without implementing the others. Extracted records are classified as global or project-scoped. Reconciliation compares only compatible records in the same scope and project, uses source chronology rather than processing order, and commits source preservation, derived records, and supersession links atomically. Recall combines global knowledge with knowledge belonging to the current working-directory project, excludes other projects, and ignores superseded records and preserved raw sources.
 
 The default retriever combines semantic similarity with field-aware BM25, gives titles more lexical weight, applies a small current-project boost, drops candidates that fall materially below the best result, and uses MMR to avoid redundant context. It may return fewer than four records when the remaining candidates are weak.
 

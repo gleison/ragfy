@@ -17,8 +17,9 @@ type RecallResponse struct {
 }
 
 type IngestPayload struct {
-	Path    string `json:"path"`
-	Text    string `json:"text,omitempty"`
-	Title   string `json:"title,omitempty"`
-	Project string `json:"project,omitempty"`
+	Path     string `json:"path"`
+	Text     string `json:"text,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Project  string `json:"project,omitempty"`
+	Provider string `json:"provider,omitempty"`
 }

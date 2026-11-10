@@ -18,7 +18,6 @@ import (
 
 	"ragfy/internal/api"
 	"ragfy/internal/buildinfo"
-	"ragfy/internal/chunking"
 	appconfig "ragfy/internal/config"
 	"ragfy/internal/digest"
 	"ragfy/internal/extraction"
@@ -136,13 +135,17 @@ func statusCommand(arguments []string, output io.Writer) error {
 func ingest(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("ingest", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	project := flags.String("project", "", "limit ingested documents to a project")
-	text := flags.String("text", "", "ingest text directly instead of files")
+	project := flags.String("project", "", "limit extracted knowledge to a project")
+	text := flags.String("text", "", "process text directly instead of files")
 	title := flags.String("title", "", "title for manually ingested text")
+	provider := flags.String("provider", "", "use codex or claude for knowledge extraction")
 	if err := flags.Parse(arguments); err != nil {
 		return errors.New("run `ragfy help ingest` for usage")
 	}
-	payload := api.IngestPayload{Project: *project, Text: *text, Title: *title}
+	payload := api.IngestPayload{Project: *project, Text: *text, Title: *title, Provider: *provider}
+	if *provider != "" && *provider != "codex" && *provider != "claude" {
+		return errors.New("provider must be codex or claude")
+	}
 	if strings.TrimSpace(*text) != "" {
 		if flags.NArg() != 0 {
 			return errors.New("text ingest does not accept a path; run `ragfy help ingest`")
@@ -247,7 +250,6 @@ func serve() (resultErr error) {
 		Extractor:  extractor,
 		Retriever:  retrieval.NewHybrid(repository),
 		Reconciler: reconciler,
-		Chunker:    chunking.NewText(1200, 160),
 		Runtime: service.RuntimeInfo{
 			Version: buildinfo.DisplayVersion(),
 			Model:   configuration.Embedding.Name(),
@@ -354,7 +356,7 @@ Commands:
   setup       Configure the embedding model, integrations, hooks, and service
   status      Check setup, service health, model cache, hooks, and knowledge
   search      Find stored memories using a phrase
-  ingest      Index files or save text directly as memory
+  ingest      Extract durable knowledge from files or supplied text
   update      Install the latest published release
   version     Print version and build information
   uninstall   Remove the service and Ragfy hooks while preserving local data
@@ -393,11 +395,14 @@ by the prompt hook. Global memories are always searched; --project also includes
 memories scoped to that project.
 `,
 		"ingest": `Usage:
-  ragfy ingest [--project <name>] <path>
-  ragfy ingest [--project <name>] [--title <title>] --text <text>
+  ragfy ingest [--project <name>] [--provider codex|claude] <path>
+  ragfy ingest [--project <name>] [--provider codex|claude] [--title <title>] --text <text>
 
-Index .md, .rst, and .txt files from a path, or store text directly. Ingest embeds
-content without running the generative session extraction used by digest hooks.
+Extract durable knowledge from .md, .rst, and .txt files or text supplied directly,
+then validate, reconcile, and embed it using the same pipeline as session digest.
+The normalized source is preserved for traceability and safe reprocessing. The
+only configured provider is selected automatically. If both are configured,
+Codex is preferred; use --provider to choose explicitly.
 `,
 		"update": `Usage: ragfy update
 
