@@ -25,22 +25,16 @@
 
 - [x] Evitar extração e re-embedding de fontes cujo conteúdo não mudou.
 - [x] Preservar versões de uma fonte alterada e aposentar os conhecimentos derivados da versão anterior, inclusive quando o arquivo encolher.
-- [ ] Detectar arquivos que desapareceram de uma raiz ingerida e aposentar seus conhecimentos derivados.
 - [x] Preservar no documento a data do arquivo em vez da data da execução da ingestão.
 - [x] Testar idempotência, versionamento da fonte e aposentadoria transacional dos conhecimentos anteriores.
-- [ ] Testar o ciclo de arquivos especificamente: alteração, remoção da raiz e mudança dos conhecimentos extraídos.
 
 ## Cobertura adicional
 
-- [ ] Avaliar e implementar recall no `SubagentStart`.
-- [x] Disponibilizar inclusão manual de conhecimento pelo pipeline normal (`ragfy ingest --text`).
-- [ ] Avaliar conectores para PDF e Obsidian antes de YouTube.
-- [ ] Avaliar configuração de raízes e atualização agendada.
-- [ ] Medir prompts longos antes de portar segmentação ou reescrita de consultas.
-- [ ] Medir precisão, recall e silêncio em consultas sem resposta antes de alterar limiares.
+- [ ] Carregar um contexto-base limitado do projeto no `SessionStart`, mantendo o recall orientado ao prompt em `UserPromptSubmit`.
 
 ## Itens deliberadamente adiados
 
 - [ ] Não implementar expiração automática por idade ou ausência de uso sem evidência de avaliação.
 - [ ] Não implementar exclusão destrutiva automática de registros superseded.
 - [ ] Não migrar o `kb.sqlite` legado.
+- [ ] Não implementar raízes gerenciadas ou atualização agendada na primeira versão; a ingestão de arquivos permanece sob demanda.
