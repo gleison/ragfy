@@ -67,6 +67,7 @@ func RemoveAll() error {
 type ConfigurationState struct {
 	Path             string `json:"path"`
 	SessionBootstrap bool   `json:"session_bootstrap"`
+	ContextReset     bool   `json:"context_reset"`
 	PromptRecall     bool   `json:"prompt_recall"`
 	SessionDigest    bool   `json:"session_digest"`
 	Executable       string `json:"executable,omitempty"`
@@ -101,12 +102,14 @@ func InspectConfiguration(source string) (ConfigurationState, error) {
 	}
 	hooks, _ := root["hooks"].(map[string]any)
 	bootstrapExecutable, bootstrapFound := eventRagfyExecutable(hooks, "SessionStart", "bootstrap", source)
+	resetExecutable, resetFound := eventRagfyExecutable(hooks, "PreCompact", "reset", source)
 	promptExecutable, promptFound := eventRagfyExecutable(hooks, "UserPromptSubmit", "recall", source)
 	digestExecutable, digestFound := eventRagfyExecutable(hooks, "SessionEnd", "digest", source)
 	state.SessionBootstrap = bootstrapFound
+	state.ContextReset = resetFound
 	state.PromptRecall = promptFound
 	state.SessionDigest = digestFound
-	if bootstrapFound && promptFound && digestFound && bootstrapExecutable == promptExecutable && promptExecutable == digestExecutable {
+	if bootstrapFound && resetFound && promptFound && digestFound && bootstrapExecutable == resetExecutable && resetExecutable == promptExecutable && promptExecutable == digestExecutable {
 		state.Executable = promptExecutable
 		state.ExecutableOK = validateExecutable(promptExecutable) == nil
 	}
@@ -186,10 +189,10 @@ func MergeConfig(path, executable, source string) error {
 	removeLegacyPythonRecallHooks(hooks)
 	removeRagfyHooks(hooks, source)
 	removeExecutableHooks(hooks, executable)
-	for event, action := range map[string]string{"SessionStart": "bootstrap", "UserPromptSubmit": "recall", "SessionEnd": "digest"} {
+	for event, action := range map[string]string{"SessionStart": "bootstrap", "PreCompact": "reset", "UserPromptSubmit": "recall", "SessionEnd": "digest"} {
 		command := strconv.Quote(executable) + " hook " + action + " " + source
 		timeout := 4
-		if event == "SessionEnd" {
+		if event == "SessionEnd" || event == "PreCompact" {
 			timeout = 2
 		}
 		entries, _ := hooks[event].([]any)
@@ -256,7 +259,7 @@ func removeLegacyPythonRecallHooks(hooks map[string]any) {
 
 func removeExecutableHooks(hooks map[string]any, executable string) {
 	prefix := strconv.Quote(executable) + " hook "
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit", "SessionEnd"} {
 		entries, _ := hooks[event].([]any)
 		keptEntries := make([]any, 0, len(entries))
 		for _, rawEntry := range entries {
@@ -284,7 +287,7 @@ func removeExecutableHooks(hooks map[string]any, executable string) {
 }
 
 func removeRagfyHooks(hooks map[string]any, source string) {
-	for _, event := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+	for _, event := range []string{"SessionStart", "PreCompact", "UserPromptSubmit", "SessionEnd"} {
 		entries, _ := hooks[event].([]any)
 		keptEntries := make([]any, 0, len(entries))
 		for _, rawEntry := range entries {
@@ -312,7 +315,7 @@ func removeRagfyHooks(hooks map[string]any, source string) {
 }
 
 func isRagfyHookCommand(command, source string) bool {
-	for _, action := range []string{"bootstrap", "recall", "digest"} {
+	for _, action := range []string{"bootstrap", "reset", "recall", "digest"} {
 		suffix := " hook " + action + " " + source
 		if !strings.HasSuffix(command, suffix) {
 			continue

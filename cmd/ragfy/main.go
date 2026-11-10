@@ -654,8 +654,9 @@ records that were superseded by knowledge from the forgotten session.
   ragfy recalls explain <recall-id> [--json]
   ragfy recalls feedback <recall-id> <candidate-rank> useful|irrelevant [--json]
 
-Review prompt recalls recorded by hooks, explain selected and cut candidates
-with their ranking scores, and mark an injected result as useful or irrelevant.
+Review prompt recalls recorded by hooks, explain selected, already-present,
+eligible, and cut candidates with their ranking scores, and mark an injected
+result as useful or irrelevant.
 `,
 		"ingest": `Usage:
   ragfy ingest [--project <name>] [--provider codex|claude] <path>

@@ -14,7 +14,7 @@ import (
 
 func Run(action, source, dataDirectory, listenAddress string, input io.Reader, output io.Writer) {
 	timeout := 4 * time.Second
-	if action == "digest" {
+	if action == "digest" || action == "reset" {
 		timeout = 2 * time.Second
 	}
 	run(action, source, dataDirectory, listenAddress, input, output, &http.Client{Timeout: timeout})
@@ -37,7 +37,9 @@ func run(action, source, dataDirectory, listenAddress string, input io.Reader, o
 	payloadBytes, _ = json.Marshal(payload)
 	endpoint := "/recall"
 	eventName := "UserPromptSubmit"
-	if action == "bootstrap" || strings.EqualFold(payload.Event, "SessionStart") || strings.EqualFold(payload.EventCodex, "SessionStart") {
+	if action == "reset" || strings.EqualFold(payload.Event, "PreCompact") || strings.EqualFold(payload.EventCodex, "PreCompact") {
+		endpoint = "/context/reset"
+	} else if action == "bootstrap" || strings.EqualFold(payload.Event, "SessionStart") || strings.EqualFold(payload.EventCodex, "SessionStart") {
 		endpoint = "/bootstrap"
 		eventName = "SessionStart"
 	} else if action == "digest" || strings.EqualFold(payload.Event, "SessionEnd") || strings.EqualFold(payload.EventCodex, "SessionEnd") {
@@ -55,7 +57,7 @@ func run(action, source, dataDirectory, listenAddress string, input io.Reader, o
 		return
 	}
 	defer response.Body.Close()
-	if endpoint == "/digest" {
+	if endpoint != "/recall" && endpoint != "/bootstrap" {
 		return
 	}
 	var result api.RecallResponse

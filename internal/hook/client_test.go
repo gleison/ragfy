@@ -97,6 +97,22 @@ func TestRunWritesSessionStartContext(t *testing.T) {
 	}
 }
 
+func TestRunResetsContextBeforeCompaction(t *testing.T) {
+	dataDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDirectory, "token"), []byte("secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingHTTPClient{response: `{"reset":true}`}
+	var output bytes.Buffer
+	run("reset", "codex", dataDirectory, "127.0.0.1:37841", strings.NewReader(`{"session_id":"s1"}`), &output, client)
+	if client.path != "/context/reset" {
+		t.Fatalf("request path = %q", client.path)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("reset hook output = %q", output.String())
+	}
+}
+
 func TestRunSkipsNestedAgentExecution(t *testing.T) {
 	t.Setenv("RAGFY_AGENT_EXEC", "1")
 	Run("digest", "codex", t.TempDir(), "127.0.0.1:1", strings.NewReader(`{"session_id":"nested"}`), &bytes.Buffer{})

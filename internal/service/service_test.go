@@ -233,6 +233,60 @@ func TestSessionBootstrapBoundsContextLength(t *testing.T) {
 	}
 }
 
+func TestRecallSuppressesSessionContextUntilCompaction(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	document := knowledge.Document{
+		Source: "sessions", SourceID: "session-hook", TS: "2026-11-01T00:00:00Z", Title: "Session hook behavior",
+		Content: "SessionStart loads project context before prompt recall runs.", Kind: "decision", Scope: knowledge.ScopeProject, Project: "ragfy", Vector: []float32{1, 0},
+	}
+	if err := repo.Upsert(ctx, document); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestService(repo, repo, &fakeModelEngine{}, 1).Routes("secret")
+	payload := api.HookPayload{Source: "codex", SessionID: "session-one", CWD: "/workspace/ragfy"}
+	bootstrap := requestJSON(t, handler, http.MethodPost, "/bootstrap", "secret", payload)
+	if bootstrap.Code != http.StatusOK || !strings.Contains(bootstrap.Body.String(), document.Title) {
+		t.Fatalf("bootstrap=%d %s", bootstrap.Code, bootstrap.Body.String())
+	}
+
+	payload.Prompt = "How does the SessionStart project context work?"
+	recall := requestJSON(t, handler, http.MethodPost, "/recall", "secret", payload)
+	var response api.RecallResponse
+	if recall.Code != http.StatusOK || json.Unmarshal(recall.Body.Bytes(), &response) != nil || response.Context != "" {
+		t.Fatalf("deduplicated recall=%d %s", recall.Code, recall.Body.String())
+	}
+	events, err := repo.RecallEvents(ctx)
+	if err != nil || len(events) != 1 || events[0].ResultCount != 0 {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+	detail, err := repo.RecallEvent(ctx, events[0].ID)
+	if err != nil || len(detail.Results) != 1 || detail.Results[0].Status != retrieval.CandidateAlreadyPresent || detail.Results[0].SelectedRank != 0 {
+		t.Fatalf("deduplicated detail=%#v err=%v", detail, err)
+	}
+
+	reset := requestJSON(t, handler, http.MethodPost, "/context/reset", "secret", payload)
+	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), `"reset":true`) {
+		t.Fatalf("reset=%d %s", reset.Code, reset.Body.String())
+	}
+	recall = requestJSON(t, handler, http.MethodPost, "/recall", "secret", payload)
+	if recall.Code != http.StatusOK || json.Unmarshal(recall.Body.Bytes(), &response) != nil || !strings.Contains(response.Context, document.Title) {
+		t.Fatalf("recall after reset=%d %s", recall.Code, recall.Body.String())
+	}
+	events, err = repo.RecallEvents(ctx)
+	if err != nil || len(events) != 2 || events[0].ResultCount != 1 {
+		t.Fatalf("events after reset=%#v err=%v", events, err)
+	}
+	recall = requestJSON(t, handler, http.MethodPost, "/recall", "secret", payload)
+	if recall.Code != http.StatusOK || json.Unmarshal(recall.Body.Bytes(), &response) != nil || response.Context != "" {
+		t.Fatalf("repeated recall=%d %s", recall.Code, recall.Body.String())
+	}
+	events, err = repo.RecallEvents(ctx)
+	if err != nil || len(events) != 3 || events[0].ResultCount != 0 {
+		t.Fatalf("events after repeated recall=%#v err=%v", events, err)
+	}
+}
+
 func TestRecallAuditAndSessionRoutes(t *testing.T) {
 	ctx := context.Background()
 	repo := openTestRepository(t)

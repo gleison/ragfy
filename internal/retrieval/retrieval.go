@@ -12,9 +12,10 @@ type Retriever interface {
 }
 
 const (
-	CandidateSelected = "selected"
-	CandidateEligible = "eligible"
-	CandidateCutoff   = "cutoff"
+	CandidateSelected       = "selected"
+	CandidateEligible       = "eligible"
+	CandidateCutoff         = "cutoff"
+	CandidateAlreadyPresent = "already_present"
 )
 
 type Candidate struct {

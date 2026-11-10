@@ -39,15 +39,17 @@ const (
 )
 
 type Service struct {
-	repository knowledge.Repository
-	embedder   model.Embedder
-	extractor  extraction.Extractor
-	retriever  retrieval.Retriever
-	reconciler reconciliation.Reconciler
-	queue      chan api.HookPayload
-	digestLock sync.Mutex
-	startedAt  time.Time
-	runtime    RuntimeInfo
+	repository  knowledge.Repository
+	embedder    model.Embedder
+	extractor   extraction.Extractor
+	retriever   retrieval.Retriever
+	reconciler  reconciliation.Reconciler
+	queue       chan api.HookPayload
+	digestLock  sync.Mutex
+	contextLock sync.Mutex
+	contextSeen map[string]map[string]bool
+	startedAt   time.Time
+	runtime     RuntimeInfo
 }
 
 type RuntimeInfo struct {
@@ -75,14 +77,15 @@ func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service
 		reconciler = reconciliation.None{}
 	}
 	return &Service{
-		repository: dependencies.Repository,
-		embedder:   dependencies.Embedder,
-		extractor:  dependencies.Extractor,
-		retriever:  dependencies.Retriever,
-		reconciler: reconciler,
-		queue:      make(chan api.HookPayload, queueCapacity),
-		startedAt:  time.Now(),
-		runtime:    dependencies.Runtime,
+		repository:  dependencies.Repository,
+		embedder:    dependencies.Embedder,
+		extractor:   dependencies.Extractor,
+		retriever:   dependencies.Retriever,
+		reconciler:  reconciler,
+		queue:       make(chan api.HookPayload, queueCapacity),
+		contextSeen: make(map[string]map[string]bool),
+		startedAt:   time.Now(),
+		runtime:     dependencies.Runtime,
 	}
 }
 
@@ -105,6 +108,7 @@ func (service *Service) Routes(token string) http.Handler {
 	}))
 	mux.HandleFunc("POST /recall", authenticate(token, service.handleRecall))
 	mux.HandleFunc("POST /bootstrap", authenticate(token, service.handleBootstrap))
+	mux.HandleFunc("POST /context/reset", authenticate(token, service.handleContextReset))
 	mux.HandleFunc("POST /digest", authenticate(token, service.handleDigest))
 	mux.HandleFunc("POST /ingest", authenticate(token, service.handleIngest))
 	mux.HandleFunc("GET /sessions", authenticate(token, service.handleSessions))
@@ -137,6 +141,7 @@ func (service *Service) handleBootstrap(writer http.ResponseWriter, request *htt
 		writeJSON(writer, api.RecallResponse{})
 		return
 	}
+	service.clearSessionContext(payload.SessionID)
 	project := strings.TrimSpace(payload.Project)
 	if project == "" && strings.TrimSpace(payload.CWD) != "" {
 		project = projectName(payload.CWD)
@@ -154,18 +159,90 @@ func (service *Service) handleBootstrap(writer http.ResponseWriter, request *htt
 		return
 	}
 	var contextText strings.Builder
+	injectedKeys := make([]string, 0, len(documents))
 	for index, document := range documents {
 		entry := fmt.Sprintf("[%d] %s\n%s\n\n", index+1, document.Title, document.Content)
 		remaining := maximumBootstrapContentLength - len(bootstrapContextFooter) - utf8.RuneCountInString(contextText.String())
 		if remaining <= 0 {
 			break
 		}
-		contextText.WriteString(truncateRunes(entry, remaining))
+		if utf8.RuneCountInString(entry) > remaining {
+			contextText.WriteString(truncateRunes(entry, remaining))
+			break
+		}
+		contextText.WriteString(entry)
+		injectedKeys = append(injectedKeys, contextKey(document))
 	}
 	if contextText.Len() > 0 {
 		contextText.WriteString(bootstrapContextFooter)
 	}
+	service.replaceSessionContext(payload.SessionID, injectedKeys)
 	writeJSON(writer, api.RecallResponse{Context: contextText.String()})
+}
+
+func (service *Service) handleContextReset(writer http.ResponseWriter, request *http.Request) {
+	var payload api.HookPayload
+	if json.NewDecoder(io.LimitReader(request.Body, 2<<20)).Decode(&payload) != nil {
+		http.Error(writer, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	service.clearSessionContext(payload.SessionID)
+	writeJSON(writer, map[string]bool{"reset": true})
+}
+
+func contextKey(document knowledge.Document) string {
+	return document.Source + "\x00" + document.SourceID
+}
+
+func (service *Service) replaceSessionContext(sessionID string, keys []string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	service.contextLock.Lock()
+	defer service.contextLock.Unlock()
+	if len(keys) == 0 {
+		delete(service.contextSeen, sessionID)
+		return
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		seen[key] = true
+	}
+	service.contextSeen[sessionID] = seen
+}
+
+func (service *Service) claimRecallHits(sessionID string, hits []knowledge.Hit) ([]knowledge.Hit, map[string]bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	service.contextLock.Lock()
+	defer service.contextLock.Unlock()
+	seen := service.contextSeen[sessionID]
+	if seen == nil {
+		seen = make(map[string]bool)
+		service.contextSeen[sessionID] = seen
+	}
+	injected := make([]knowledge.Hit, 0, len(hits))
+	suppressed := make(map[string]bool)
+	for _, hit := range hits {
+		key := contextKey(hit.Doc)
+		if seen[key] {
+			suppressed[key] = true
+			continue
+		}
+		seen[key] = true
+		injected = append(injected, hit)
+	}
+	return injected, suppressed
+}
+
+func (service *Service) clearSessionContext(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	service.contextLock.Lock()
+	delete(service.contextSeen, sessionID)
+	service.contextLock.Unlock()
 }
 
 func (service *Service) handleRecall(writer http.ResponseWriter, request *http.Request) {
@@ -199,6 +276,10 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 		return
 	}
 	hits := explanation.Selected
+	suppressed := make(map[string]bool)
+	if payload.Source != "cli" && strings.TrimSpace(payload.SessionID) != "" {
+		hits, suppressed = service.claimRecallHits(payload.SessionID, hits)
+	}
 	var contextText strings.Builder
 	for index, hit := range hits {
 		fmt.Fprintf(&contextText, "[%d] %s\n%s\n\n", index+1, hit.Doc.Title, hit.Doc.Content)
@@ -217,8 +298,24 @@ func (service *Service) handleRecall(writer http.ResponseWriter, request *http.R
 		}
 		for _, candidate := range explanation.Candidates {
 			hit := candidate.Hit
+			status := candidate.Status
+			selectedRank := candidate.SelectedRank
+			if status == retrieval.CandidateSelected {
+				key := contextKey(hit.Doc)
+				if suppressed[key] {
+					status = retrieval.CandidateAlreadyPresent
+					selectedRank = 0
+				} else {
+					for index, injected := range hits {
+						if contextKey(injected.Doc) == key {
+							selectedRank = index + 1
+							break
+						}
+					}
+				}
+			}
 			event.Results = append(event.Results, knowledge.RecallResult{
-				Rank: candidate.Rank, SelectedRank: candidate.SelectedRank, Status: candidate.Status,
+				Rank: candidate.Rank, SelectedRank: selectedRank, Status: status,
 				SourceID: hit.Doc.SourceID, Title: hit.Doc.Title, Content: hit.Doc.Content,
 				Kind: hit.Doc.Kind, Scope: hit.Doc.Scope, Project: hit.Doc.Project, Score: hit.Score,
 				SemanticScore: hit.SemanticScore, LexicalScore: hit.LexicalScore, ProjectBoost: hit.ProjectBoost,
@@ -322,6 +419,7 @@ func (service *Service) handleDigest(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "invalid payload", http.StatusBadRequest)
 		return
 	}
+	service.clearSessionContext(payload.SessionID)
 	select {
 	case service.queue <- payload:
 		writeJSON(writer, map[string]bool{"queued": true})

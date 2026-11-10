@@ -65,11 +65,11 @@ ragfy ingest --provider claude --text "Production uses PostgreSQL 17."
 
 `sessions list` shows digested sessions and active or superseded record counts. `sessions show <session-id>` displays preserved source versions and their derived knowledge. `sessions forget <session-id>` removes that session, its source versions, derived records, and recall history in one transaction; records superseded by the removed knowledge are reactivated. Add `--json` to any of these commands for machine-readable output.
 
-Prompt-hook recalls are recorded locally with their session, prompt, candidate memory snapshots, ranking scores, selection status, and relevance cutoffs. `recalls list` shows the history, `recalls show <recall-id>` shows the injected memories, and `recalls explain <recall-id>` includes selected, eligible, and cut candidates. Use `recalls feedback <recall-id> <candidate-rank> useful|irrelevant` to classify an injected result; cut candidates cannot receive feedback. CLI searches are not recorded as injected prompt context. All recall audit commands support `--json`.
+Prompt-hook recalls are recorded locally with their session, prompt, candidate memory snapshots, ranking scores, selection status, and relevance cutoffs. `recalls list` shows the history, `recalls show <recall-id>` shows the injected memories, and `recalls explain <recall-id>` includes selected, already-present, eligible, and cut candidates. Use `recalls feedback <recall-id> <candidate-rank> useful|irrelevant` to classify an injected result; candidates omitted from the prompt cannot receive feedback. CLI searches are not recorded as injected prompt context. All recall audit commands support `--json`.
 
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 
-`SessionStart` loads up to six of the newest active project-scoped memories, bounded to 6,000 characters, without starting the embedding model. Global memories and memories from other projects are not included in this base context. `UserPromptSubmit` remains responsible for semantic and lexical recall specific to each prompt.
+`SessionStart` loads up to six of the newest active project-scoped memories, bounded to 6,000 characters, without starting the embedding model. Global memories and memories from other projects are not included in this base context. `UserPromptSubmit` remains responsible for semantic and lexical recall specific to each prompt, but omits exact records already injected during the same session. The audit marks them as `already_present`. `PreCompact` clears the session's injected-record set so relevant knowledge can be recalled again after context compaction.
 
 `ingest` processes `.md`, `.rst`, and `.txt` files as global knowledge by default. It can also process a phrase or note directly with `--text`, optionally using `--title`. Pass `--project <name>` to restrict extracted knowledge to that project. Files, manual text, and session digests all use the same extraction, evidence validation, reconciliation, embedding, and persistence pipeline. When both integrations are configured, ingest prefers Codex; `--provider codex|claude` selects one explicitly. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
 
@@ -98,6 +98,7 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 ```text
 SessionStart     -> provider hook -> bounded active project context -> session
 UserPromptSubmit -> provider hook -> local embeddings + hybrid search -> context + SQLite recall audit
+PreCompact       -> provider hook -> clear session deduplication state
 SessionEnd       -> provider hook -> digestion queue -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ingest           -> file or text -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ```

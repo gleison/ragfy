@@ -33,7 +33,7 @@ func TestWriteReportsHealthyRuntimeAndKnowledge(t *testing.T) {
 			Knowledge: knowledge.Statistics{ActiveRecords: 4, SupersededRecords: 2, DigestedSessions: 3, Projects: 1},
 		},
 		Model:        Model{Name: "embedding.gguf", Cached: true, Size: 10 << 20, Pooling: "last"},
-		Integrations: []Integration{{Name: "codex", Selected: true, ExecutableOK: true, HookExecutableOK: true, SessionBootstrap: true, PromptRecall: true, SessionDigest: true}},
+		Integrations: []Integration{{Name: "codex", Selected: true, ExecutableOK: true, HookExecutableOK: true, SessionBootstrap: true, ContextReset: true, PromptRecall: true, SessionDigest: true}},
 	}
 	var output bytes.Buffer
 	if err := Write(&output, report, false, false); err != nil {

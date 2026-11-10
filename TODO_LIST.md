@@ -31,6 +31,7 @@
 ## Cobertura adicional
 
 - [x] Carregar um contexto-base limitado do projeto no `SessionStart`, mantendo o recall orientado ao prompt em `UserPromptSubmit`.
+- [x] Evitar reinjetar na mesma sessão conhecimentos já presentes, liberando-os novamente após `PreCompact`.
 
 ## Itens deliberadamente adiados
 
