@@ -76,7 +76,7 @@ func run(command string, arguments []string) error {
 	case "install":
 		return install()
 	case "uninstall":
-		return setupflow.Uninstall()
+		return uninstallCommand(commandArguments(arguments), os.Stdout)
 	case "status":
 		return statusCommand(commandArguments(arguments), os.Stdout)
 	case "setup":
@@ -572,6 +572,32 @@ func install() error {
 	return platform.InstallService(executable)
 }
 
+func uninstallCommand(arguments []string, output io.Writer) error {
+	flags := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	purge := flags.Bool("purge", false, "remove all Ragfy data")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		return errors.New("usage: ragfy uninstall [--purge]")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	dataDirectory, err := platform.AppDataDir()
+	if err != nil {
+		return err
+	}
+	if err := setupflow.Uninstall(executable, *purge); err != nil {
+		return err
+	}
+	if *purge {
+		fmt.Fprintln(output, "Ragfy uninstalled and local data removed.")
+	} else {
+		fmt.Fprintf(output, "Ragfy uninstalled. Local data preserved at %s.\n", dataDirectory)
+	}
+	return nil
+}
+
 func setupHooks() error {
 	executable, err := os.Executable()
 	if err != nil {
@@ -624,7 +650,7 @@ Commands:
   ingest      Extract durable knowledge from files or supplied text
   update      Install the latest published release
   version     Print version and build information
-  uninstall   Remove the service and Ragfy hooks while preserving local data
+  uninstall   Remove Ragfy; preserve local data unless --purge is used
   help        Show this help or detailed help for one command
 
 Examples:
@@ -711,10 +737,11 @@ in its current prefix. Homebrew installations must use 'brew upgrade ragfy'.
 
 Print the CLI version, commit, and build date.
 `,
-		"uninstall": `Usage: ragfy uninstall
+		"uninstall": `Usage: ragfy uninstall [--purge]
 
-Remove service startup registration and Ragfy hooks. The database, downloaded
-models, configuration, and logs are preserved.
+Remove the executable, service startup registration, and Ragfy hooks. The
+database, downloaded models, configuration, and logs are preserved by default.
+Use --purge to remove all local Ragfy data too.
 `,
 		"help": `Usage: ragfy help [command]
 

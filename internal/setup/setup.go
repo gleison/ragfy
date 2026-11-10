@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	appconfig "ragfy/internal/config"
@@ -71,6 +75,71 @@ func Run(ctx context.Context, executable string, input io.Reader, output io.Writ
 	return nil
 }
 
-func Uninstall() error {
-	return errors.Join(platform.UninstallService(), hook.RemoveAll())
+func Uninstall(executable string, purge bool) error {
+	var uninstallErrors []error
+	uninstallErrors = append(uninstallErrors,
+		wrapUninstallError("remove service", platform.UninstallService()),
+		wrapUninstallError("remove hooks", hook.RemoveAll()),
+	)
+	if purge {
+		dataDirectory, err := platform.AppDataDir()
+		if err != nil {
+			uninstallErrors = append(uninstallErrors, wrapUninstallError("purge local data", err))
+		} else {
+			uninstallErrors = append(uninstallErrors, wrapUninstallError("purge local data", removeDataDirectory(dataDirectory)))
+		}
+	}
+	uninstallErrors = append(uninstallErrors, wrapUninstallError("remove executable", removeExecutable(executable)))
+	return errors.Join(uninstallErrors...)
+}
+
+func wrapUninstallError(action string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", action, err)
+}
+
+func removeDataDirectory(directory string) error {
+	absolute, err := filepath.Abs(directory)
+	if err != nil {
+		return err
+	}
+	clean := filepath.Clean(absolute)
+	home, _ := os.UserHomeDir()
+	if clean == filepath.Clean(string(filepath.Separator)) || home != "" && clean == filepath.Clean(home) {
+		return fmt.Errorf("refusing to purge unsafe data directory %q", clean)
+	}
+	return os.RemoveAll(clean)
+}
+
+func removeExecutable(executable string) error {
+	absolute, err := filepath.Abs(executable)
+	if err != nil {
+		return err
+	}
+	name := strings.ToLower(filepath.Base(absolute))
+	if name != "ragfy" && name != "ragfy.exe" {
+		return fmt.Errorf("refusing to remove unexpected executable %q", absolute)
+	}
+	if isHomebrewExecutable(absolute) {
+		return errors.New("this installation is managed by Homebrew; run `brew uninstall ragfy`")
+	}
+	if err := os.Remove(absolute); err == nil || os.IsNotExist(err) {
+		return nil
+	} else if !os.IsPermission(err) || runtime.GOOS == "windows" {
+		return err
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return fmt.Errorf("removing %s requires elevated permissions", absolute)
+	}
+	if err := exec.Command("sudo", "rm", "-f", "--", absolute).Run(); err != nil {
+		return fmt.Errorf("remove %s with sudo: %w", absolute, err)
+	}
+	return nil
+}
+
+func isHomebrewExecutable(path string) bool {
+	normalized := filepath.ToSlash(strings.ToLower(path))
+	return strings.Contains(normalized, "/cellar/") || strings.Contains(normalized, "/homebrew/")
 }

@@ -41,6 +41,28 @@ func TestCommandArgumentsHandlesDefaultStatusInvocation(t *testing.T) {
 	}
 }
 
+func TestUninstallHelpDescribesPreserveAndPurgeModes(t *testing.T) {
+	var output bytes.Buffer
+	if !writeCommandHelp(&output, "uninstall") {
+		t.Fatal("uninstall help was not found")
+	}
+	for _, expected := range []string{"[--purge]", "preserved by default", "remove all local Ragfy data"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("uninstall help missing %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestUninstallRejectsUnknownArgumentsBeforeChangingInstallation(t *testing.T) {
+	var output bytes.Buffer
+	for _, arguments := range [][]string{{"--unknown"}, {"extra"}} {
+		err := uninstallCommand(arguments, &output)
+		if err == nil || err.Error() != "usage: ragfy uninstall [--purge]" {
+			t.Fatalf("arguments %#v returned %v", arguments, err)
+		}
+	}
+}
+
 func TestHelpDescribesSearchAndTextIngest(t *testing.T) {
 	var global bytes.Buffer
 	writeGlobalHelp(&global)
