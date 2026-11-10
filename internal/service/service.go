@@ -31,8 +31,11 @@ import (
 )
 
 const (
-	minimumSpineCharacters = 500
-	defaultQueueCapacity   = 32
+	minimumSpineCharacters        = 500
+	defaultQueueCapacity          = 32
+	maximumBootstrapRecords       = 6
+	maximumBootstrapContentLength = 6000
+	bootstrapContextFooter        = "\n---\nKB PROJECT CONTEXT: Active project knowledge loaded at session start. Use only when relevant."
 )
 
 type Service struct {
@@ -101,6 +104,7 @@ func (service *Service) Routes(token string) http.Handler {
 		})
 	}))
 	mux.HandleFunc("POST /recall", authenticate(token, service.handleRecall))
+	mux.HandleFunc("POST /bootstrap", authenticate(token, service.handleBootstrap))
 	mux.HandleFunc("POST /digest", authenticate(token, service.handleDigest))
 	mux.HandleFunc("POST /ingest", authenticate(token, service.handleIngest))
 	mux.HandleFunc("GET /sessions", authenticate(token, service.handleSessions))
@@ -125,6 +129,43 @@ func authenticate(token string, next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(writer, request)
 	}
+}
+
+func (service *Service) handleBootstrap(writer http.ResponseWriter, request *http.Request) {
+	var payload api.HookPayload
+	if json.NewDecoder(io.LimitReader(request.Body, 2<<20)).Decode(&payload) != nil {
+		writeJSON(writer, api.RecallResponse{})
+		return
+	}
+	project := strings.TrimSpace(payload.Project)
+	if project == "" && strings.TrimSpace(payload.CWD) != "" {
+		project = projectName(payload.CWD)
+	}
+	if project == "" || project == "unknown" {
+		writeJSON(writer, api.RecallResponse{})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
+	defer cancel()
+	documents, err := service.repository.ProjectContext(ctx, project, maximumBootstrapRecords)
+	if err != nil {
+		log.Printf("project bootstrap %s: %v", project, err)
+		writeJSON(writer, api.RecallResponse{})
+		return
+	}
+	var contextText strings.Builder
+	for index, document := range documents {
+		entry := fmt.Sprintf("[%d] %s\n%s\n\n", index+1, document.Title, document.Content)
+		remaining := maximumBootstrapContentLength - len(bootstrapContextFooter) - utf8.RuneCountInString(contextText.String())
+		if remaining <= 0 {
+			break
+		}
+		contextText.WriteString(truncateRunes(entry, remaining))
+	}
+	if contextText.Len() > 0 {
+		contextText.WriteString(bootstrapContextFooter)
+	}
+	writeJSON(writer, api.RecallResponse{Context: contextText.String()})
 }
 
 func (service *Service) handleRecall(writer http.ResponseWriter, request *http.Request) {
@@ -771,6 +812,17 @@ func truncate(text string, maximumLength int) string {
 		maximumLength--
 	}
 	return text[:maximumLength]
+}
+
+func truncateRunes(text string, maximumLength int) string {
+	if maximumLength <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maximumLength {
+		return text
+	}
+	return string(runes[:maximumLength])
 }
 
 func SHA256Hex(data []byte) string {

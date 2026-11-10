@@ -36,7 +36,11 @@ func run(action, source, dataDirectory, listenAddress string, input io.Reader, o
 	payload.Source = source
 	payloadBytes, _ = json.Marshal(payload)
 	endpoint := "/recall"
-	if action == "digest" || strings.EqualFold(payload.Event, "SessionEnd") || strings.EqualFold(payload.EventCodex, "SessionEnd") {
+	eventName := "UserPromptSubmit"
+	if action == "bootstrap" || strings.EqualFold(payload.Event, "SessionStart") || strings.EqualFold(payload.EventCodex, "SessionStart") {
+		endpoint = "/bootstrap"
+		eventName = "SessionStart"
+	} else if action == "digest" || strings.EqualFold(payload.Event, "SessionEnd") || strings.EqualFold(payload.EventCodex, "SessionEnd") {
 		endpoint = "/digest"
 	}
 	token, _ := os.ReadFile(filepath.Join(dataDirectory, "token"))
@@ -51,22 +55,26 @@ func run(action, source, dataDirectory, listenAddress string, input io.Reader, o
 		return
 	}
 	defer response.Body.Close()
-	if endpoint != "/recall" {
+	if endpoint == "/digest" {
 		return
 	}
 	var result api.RecallResponse
 	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) == nil {
-		_ = WritePromptOutput(output, result.Context)
+		_ = WriteContextOutput(output, eventName, result.Context)
 	}
 }
 
 func WritePromptOutput(writer io.Writer, contextText string) error {
+	return WriteContextOutput(writer, "UserPromptSubmit", contextText)
+}
+
+func WriteContextOutput(writer io.Writer, eventName, contextText string) error {
 	if strings.TrimSpace(contextText) == "" {
 		return nil
 	}
 	return json.NewEncoder(writer).Encode(map[string]any{
 		"hookSpecificOutput": map[string]string{
-			"hookEventName":     "UserPromptSubmit",
+			"hookEventName":     eventName,
 			"additionalContext": contextText,
 		},
 	})

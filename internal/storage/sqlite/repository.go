@@ -563,6 +563,32 @@ func (repository *Repository) SearchableDocuments(ctx context.Context) ([]knowle
 	return documents, nil
 }
 
+func (repository *Repository) ProjectContext(ctx context.Context, project string, limit int) ([]knowledge.Document, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := repository.database.QueryContext(ctx, `SELECT source,source_id,ts,title,content,metadata,kind,area,scope,project,status,superseded_by,superseded_at,consolidation_reason,origin_id
+FROM docs
+WHERE status='active' AND scope='project' AND project=?
+ORDER BY CASE WHEN ts='' THEN 1 ELSE 0 END,ts DESC,id DESC
+LIMIT ?`, project, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	documents := make([]knowledge.Document, 0, limit)
+	for rows.Next() {
+		var document knowledge.Document
+		var metadata string
+		if err := rows.Scan(&document.Source, &document.SourceID, &document.TS, &document.Title, &document.Content, &metadata, &document.Kind, &document.Area, &document.Scope, &document.Project, &document.Status, &document.SupersededBy, &document.SupersededAt, &document.ConsolidationReason, &document.OriginID); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(metadata), &document.Metadata)
+		documents = append(documents, document)
+	}
+	return documents, rows.Err()
+}
+
 func migrateSchema(database *sql.DB) error {
 	columns := map[string]string{
 		"status":               "TEXT NOT NULL DEFAULT 'active'",

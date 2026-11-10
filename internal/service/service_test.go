@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"ragfy/internal/api"
 	"ragfy/internal/digest"
@@ -165,6 +166,70 @@ func TestServiceRoutesAuthenticateAndRecallKnowledge(t *testing.T) {
 	short := requestJSON(t, handler, http.MethodPost, "/recall", "secret", api.HookPayload{Prompt: "short"})
 	if short.Code != http.StatusOK || short.Body.String() != "{}\n" {
 		t.Fatalf("short prompt response = %d %q", short.Code, short.Body.String())
+	}
+}
+
+func TestSessionBootstrapLoadsOnlyBoundedActiveProjectContext(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	documents := []knowledge.Document{
+		{Source: "sessions", SourceID: "older", TS: "2026-10-01T00:00:00Z", Title: "Older project decision", Content: "older content", Kind: "decision", Scope: knowledge.ScopeProject, Project: "ragfy"},
+		{Source: "sessions", SourceID: "newer", TS: "2026-11-01T00:00:00Z", Title: "Newer project decision", Content: "newer content", Kind: "decision", Scope: knowledge.ScopeProject, Project: "ragfy"},
+		{Source: "sessions", SourceID: "other", TS: "2026-11-02T00:00:00Z", Title: "Other project", Content: "must not appear", Kind: "decision", Scope: knowledge.ScopeProject, Project: "other"},
+		{Source: "manual", SourceID: "global", TS: "2026-11-03T00:00:00Z", Title: "Global knowledge", Content: "must not appear", Kind: "fact", Scope: knowledge.ScopeGlobal},
+		{Source: "sessions", SourceID: "retired", TS: "2026-11-04T00:00:00Z", Title: "Retired project fact", Content: "must not appear", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Status: knowledge.StatusSuperseded},
+	}
+	for _, document := range documents {
+		if err := repo.Upsert(ctx, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := &fakeModelEngine{}
+	handler := newTestService(repo, repo, models, 1).Routes("secret")
+	bootstrap := requestJSON(t, handler, http.MethodPost, "/bootstrap", "secret", api.HookPayload{Source: "codex", SessionID: "session", CWD: "/workspace/ragfy"})
+	if bootstrap.Code != http.StatusOK {
+		t.Fatalf("bootstrap status = %d: %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	var response api.RecallResponse
+	if err := json.Unmarshal(bootstrap.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(response.Context, "Newer project decision") || !strings.Contains(response.Context, "Older project decision") || !strings.Contains(response.Context, "KB PROJECT CONTEXT") {
+		t.Fatalf("bootstrap context = %q", response.Context)
+	}
+	if strings.Index(response.Context, "Newer project decision") > strings.Index(response.Context, "Older project decision") {
+		t.Fatalf("bootstrap context is not newest first: %q", response.Context)
+	}
+	for _, excluded := range []string{"Other project", "Global knowledge", "Retired project fact", "must not appear"} {
+		if strings.Contains(response.Context, excluded) {
+			t.Fatalf("bootstrap included %q: %q", excluded, response.Context)
+		}
+	}
+	if models.embedCalls != 0 {
+		t.Fatalf("bootstrap loaded the embedding model %d times", models.embedCalls)
+	}
+}
+
+func TestSessionBootstrapBoundsContextLength(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	if err := repo.Upsert(ctx, knowledge.Document{
+		Source: "manual", SourceID: "large", TS: "2026-11-01T00:00:00Z", Title: "Large project note",
+		Content: strings.Repeat("á", maximumBootstrapContentLength), Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	handler := newTestService(repo, repo, &fakeModelEngine{}, 1).Routes("secret")
+	bootstrap := requestJSON(t, handler, http.MethodPost, "/bootstrap", "secret", api.HookPayload{CWD: "/workspace/ragfy"})
+	var response api.RecallResponse
+	if bootstrap.Code != http.StatusOK || json.Unmarshal(bootstrap.Body.Bytes(), &response) != nil {
+		t.Fatalf("bootstrap=%d %s", bootstrap.Code, bootstrap.Body.String())
+	}
+	if length := utf8.RuneCountInString(response.Context); length != maximumBootstrapContentLength {
+		t.Fatalf("bootstrap context length = %d, want %d", length, maximumBootstrapContentLength)
+	}
+	if !strings.HasSuffix(response.Context, bootstrapContextFooter) {
+		t.Fatalf("bootstrap context is missing footer: %q", response.Context[len(response.Context)-200:])
 	}
 }
 

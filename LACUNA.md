@@ -10,7 +10,7 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 | Pendente | Calibrar relevância com evidência | Os limiares atuais estão fixos no código; o legado tinha probe, feedback e autotune | Alta |
 | Concluído | Ingestão idempotente sob demanda | Conteúdo inalterado não é extraído nem re-embeddado; uma versão alterada preserva a fonte anterior e aposenta seus registros. Ausência de arquivos não representa exclusão porque não existem raízes gerenciadas | Fechada |
 | Não portar | Recall para subagentes | O agente principal é responsável por fornecer o contexto necessário ao delegar; o Ragfy não registrará `SubagentStart` | Fora do escopo |
-| Pendente | Contexto-base no início da sessão | Carregar um conjunto limitado de conhecimentos ativos do projeto via `SessionStart`; `UserPromptSubmit` continua responsável pelo recall específico de cada prompt | Média |
+| Concluído | Contexto-base no início da sessão | `SessionStart` carrega até seis conhecimentos ativos e recentes do projeto, limitado a 6.000 caracteres e sem iniciar o modelo de embeddings; `UserPromptSubmit` continua responsável pelo recall específico de cada prompt | Fechada |
 | Pendente | PDF, Obsidian e YouTube | Não foram portados | Média, conforme o produto desejado |
 | Adiado | Agendamento e raízes configuradas | Não fazem parte da primeira versão; a ingestão permanece explicitamente sob demanda | Fora da v1 |
 | Pendente | Reescrita ou segmentação de prompts, recência e uso | Não foram portados | Experimental; portar apenas se uma avaliação provar a necessidade |
@@ -24,4 +24,4 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 
 ## Direção recomendada
 
-A memória de sessões já é observável e reversível por `sessions list|show|forget`, e o ciclo de auditoria do recall inclui candidatos, cortes, pontuações e feedback humano. Para finalizar a primeira versão, resta carregar um contexto-base limitado do projeto no `SessionStart`.
+A primeira versão está funcionalmente fechada: a memória de sessões é observável e reversível, o recall possui auditoria e feedback, e o `SessionStart` carrega um contexto-base limitado do projeto sem substituir o recall orientado ao prompt.

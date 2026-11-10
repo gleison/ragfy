@@ -91,6 +91,10 @@ func TestMergeHookFilePreservesUnrelatedHooksAndIsIdempotent(t *testing.T) {
 	if len(hookCommands(t, root, "PostToolUse")) != 1 {
 		t.Fatalf("unrelated event was modified: %#v", root)
 	}
+	bootstrapCommands := hookCommands(t, root, "SessionStart")
+	if len(bootstrapCommands) != 1 || bootstrapCommands[0]["command"] != `"/Applications/Ragfy Tools/ragfy" hook bootstrap codex` || bootstrapCommands[0]["timeout"] != float64(4) {
+		t.Fatalf("unexpected bootstrap hook: %#v", bootstrapCommands)
+	}
 
 	backup, err := os.ReadFile(path + ".ragfy.bak")
 	if err != nil {
@@ -108,7 +112,7 @@ func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := readHookConfig(t, created)
-	if len(hookCommands(t, root, "UserPromptSubmit")) != 1 || len(hookCommands(t, root, "SessionEnd")) != 1 {
+	if len(hookCommands(t, root, "SessionStart")) != 1 || len(hookCommands(t, root, "UserPromptSubmit")) != 1 || len(hookCommands(t, root, "SessionEnd")) != 1 {
 		t.Fatalf("new config is incomplete: %#v", root)
 	}
 
@@ -123,7 +127,7 @@ func TestMergeHookFileCreatesConfigAndRejectsInvalidJSON(t *testing.T) {
 
 func TestRemoveConfigRemovesOnlyRagfyHooks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
-	contents := `{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/usr/local/bin/unrelated"},{"type":"command","command":"\"/usr/local/bin/ragfy\" hook recall codex"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"\"/usr/local/bin/ragfy\" hook digest codex"}]}]}}`
+	contents := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"/usr/local/bin/ragfy\" hook bootstrap codex"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/usr/local/bin/unrelated"},{"type":"command","command":"\"/usr/local/bin/ragfy\" hook recall codex"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"\"/usr/local/bin/ragfy\" hook digest codex"}]}]}}`
 	if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +141,9 @@ func TestRemoveConfigRemovesOnlyRagfyHooks(t *testing.T) {
 	}
 	if len(hookCommands(t, root, "SessionEnd")) != 0 {
 		t.Fatalf("digest hook was not removed: %#v", root)
+	}
+	if len(hookCommands(t, root, "SessionStart")) != 0 {
+		t.Fatalf("bootstrap hook was not removed: %#v", root)
 	}
 }
 
@@ -158,7 +165,7 @@ func TestInspectConfigurationReportsBothHooks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.PromptRecall || !state.SessionDigest || !state.ExecutableOK || state.Executable != executable || state.Path != path {
+	if !state.SessionBootstrap || !state.PromptRecall || !state.SessionDigest || !state.ExecutableOK || state.Executable != executable || state.Path != path {
 		t.Fatalf("configuration state = %#v", state)
 	}
 	if err := os.Remove(executable); err != nil {

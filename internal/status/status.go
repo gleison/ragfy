@@ -26,6 +26,7 @@ type Integration struct {
 	HookExecutable   string `json:"hook_executable,omitempty"`
 	ExecutableOK     bool   `json:"executable_ok"`
 	HookExecutableOK bool   `json:"hook_executable_ok"`
+	SessionBootstrap bool   `json:"session_bootstrap"`
 	PromptRecall     bool   `json:"prompt_recall"`
 	SessionDigest    bool   `json:"session_digest"`
 	Error            string `json:"error,omitempty"`
@@ -100,11 +101,12 @@ func Inspect(ctx context.Context, version, listenAddress string) Report {
 				integration.HookPath = hooks.Path
 				integration.HookExecutable = hooks.Executable
 				integration.HookExecutableOK = hooks.ExecutableOK
+				integration.SessionBootstrap = hooks.SessionBootstrap
 				integration.PromptRecall = hooks.PromptRecall
 				integration.SessionDigest = hooks.SessionDigest
 				if integration.Error == "" {
 					switch {
-					case !hooks.PromptRecall || !hooks.SessionDigest:
+					case !hooks.SessionBootstrap || !hooks.PromptRecall || !hooks.SessionDigest:
 						integration.Error = "Ragfy hooks are missing; run `ragfy setup`"
 					case !hooks.ExecutableOK:
 						integration.Error = "The hook executable is unavailable; run `ragfy setup` and restart active client sessions"
@@ -126,7 +128,7 @@ func ready(report Report) bool {
 		return false
 	}
 	for _, integration := range report.Integrations {
-		if integration.Selected && (!integration.ExecutableOK || !integration.HookExecutableOK || !integration.PromptRecall || !integration.SessionDigest) {
+		if integration.Selected && (!integration.ExecutableOK || !integration.HookExecutableOK || !integration.SessionBootstrap || !integration.PromptRecall || !integration.SessionDigest) {
 			return false
 		}
 	}
@@ -255,7 +257,7 @@ func Write(writer io.Writer, report Report, asJSON, verbose bool) error {
 			fmt.Fprintf(writer, "  ○ %-11s not selected\n", label)
 			continue
 		}
-		if integration.ExecutableOK && integration.HookExecutableOK && integration.PromptRecall && integration.SessionDigest {
+		if integration.ExecutableOK && integration.HookExecutableOK && integration.SessionBootstrap && integration.PromptRecall && integration.SessionDigest {
 			fmt.Fprintf(writer, "  ✓ %-11s executable found, hooks configured\n", label)
 		} else {
 			fmt.Fprintf(writer, "  ✗ %-11s configuration incomplete\n", label)

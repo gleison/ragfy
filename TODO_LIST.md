@@ -30,7 +30,7 @@
 
 ## Cobertura adicional
 
-- [ ] Carregar um contexto-base limitado do projeto no `SessionStart`, mantendo o recall orientado ao prompt em `UserPromptSubmit`.
+- [x] Carregar um contexto-base limitado do projeto no `SessionStart`, mantendo o recall orientado ao prompt em `UserPromptSubmit`.
 
 ## Itens deliberadamente adiados
 

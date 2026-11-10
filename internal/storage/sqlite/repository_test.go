@@ -16,6 +16,30 @@ func testSource(id, kind, key string) knowledge.Source {
 	return knowledge.Source{ID: id, Kind: kind, Key: key, Content: "source content " + id, ContentHash: "hash-" + id, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 }
 
+func TestProjectContextReturnsNewestActiveProjectRecordsWithinLimit(t *testing.T) {
+	repo := openTestRepository(t)
+	ctx := context.Background()
+	for index := 0; index < 7; index++ {
+		document := knowledge.Document{
+			Source: "sessions", SourceID: string(rune('a' + index)), TS: time.Date(2026, time.November, index+1, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+			Title: "project record", Content: "content", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy",
+		}
+		if err := repo.Upsert(ctx, document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repo.Upsert(ctx, knowledge.Document{Source: "sessions", SourceID: "retired", TS: "2026-12-01T00:00:00Z", Title: "retired", Content: "content", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Status: knowledge.StatusSuperseded}); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.ProjectContext(ctx, "ragfy", 6)
+	if err != nil || len(documents) != 6 {
+		t.Fatalf("project context=%#v err=%v", documents, err)
+	}
+	if documents[0].SourceID != "g" || documents[5].SourceID != "b" {
+		t.Fatalf("project context order/limit = %#v", documents)
+	}
+}
+
 func TestOpenMigratesExistingRagfyDatabaseForSupersession(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory.sqlite")
 	database, err := sql.Open("sqlite", path)

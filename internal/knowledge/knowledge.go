@@ -150,6 +150,7 @@ type Repository interface {
 	EmbeddingModel(context.Context) (string, error)
 	SetEmbeddingModel(context.Context, string) error
 	Documents(context.Context) ([]Document, error)
+	ProjectContext(context.Context, string, int) ([]Document, error)
 	UpdateEmbedding(context.Context, string, string, []float32) error
 	HasSession(context.Context, string, string) (bool, error)
 	CommitSession(context.Context, SessionCommit) error

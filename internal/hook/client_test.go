@@ -14,15 +14,22 @@ import (
 type recordingHTTPClient struct {
 	payload       map[string]any
 	authorization string
+	path          string
+	response      string
 }
 
 func (client *recordingHTTPClient) Do(request *http.Request) (*http.Response, error) {
 	client.authorization = request.Header.Get("Authorization")
+	client.path = request.URL.Path
 	client.payload = make(map[string]any)
 	if err := json.NewDecoder(request.Body).Decode(&client.payload); err != nil {
 		return nil, err
 	}
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+	response := client.response
+	if response == "" {
+		response = `{}`
+	}
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response))}, nil
 }
 
 func TestWritePromptHookOutputUsesCodexJSONEnvelope(t *testing.T) {
@@ -62,6 +69,31 @@ func TestRunAddsExplicitProviderSource(t *testing.T) {
 	}
 	if client.payload["source"] != "claude" || client.payload["session_id"] != "s1" {
 		t.Fatalf("received payload = %#v", client.payload)
+	}
+}
+
+func TestRunWritesSessionStartContext(t *testing.T) {
+	dataDirectory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dataDirectory, "token"), []byte("secret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &recordingHTTPClient{response: `{"context":"project context"}`}
+	var output bytes.Buffer
+	run("bootstrap", "codex", dataDirectory, "127.0.0.1:37841", strings.NewReader(`{"session_id":"s1","cwd":"/workspace/ragfy"}`), &output, client)
+	if client.path != "/bootstrap" {
+		t.Fatalf("request path = %q", client.path)
+	}
+	var envelope struct {
+		HookSpecificOutput struct {
+			HookEventName     string `json:"hookEventName"`
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.HookSpecificOutput.HookEventName != "SessionStart" || envelope.HookSpecificOutput.AdditionalContext != "project context" {
+		t.Fatalf("bootstrap output = %#v", envelope)
 	}
 }
 

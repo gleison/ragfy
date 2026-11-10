@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Your local second brain for Claude Code and Codex.</strong></p>
 
-A local knowledge base for Claude Code and Codex. A Go service keeps the embedding model loaded; hooks make short calls to the service to retrieve context before a prompt and digest the session when it ends. Session extraction runs through the same agent provider that created the transcript.
+A local knowledge base for Claude Code and Codex. A Go service keeps the embedding model loaded; hooks make short calls to the service to load bounded project context when a session starts, retrieve context before a prompt, and digest the session when it ends. Session extraction runs through the same agent provider that created the transcript.
 
 ## Install
 
@@ -69,6 +69,8 @@ Prompt-hook recalls are recorded locally with their session, prompt, candidate m
 
 The integration selection is the desired state. Running `setup` again adds hooks for selected clients and removes Ragfy hooks from deselected clients while preserving unrelated settings. `setup-hooks` applies the saved selection without rerunning the wizard.
 
+`SessionStart` loads up to six of the newest active project-scoped memories, bounded to 6,000 characters, without starting the embedding model. Global memories and memories from other projects are not included in this base context. `UserPromptSubmit` remains responsible for semantic and lexical recall specific to each prompt.
+
 `ingest` processes `.md`, `.rst`, and `.txt` files as global knowledge by default. It can also process a phrase or note directly with `--text`, optionally using `--title`. Pass `--project <name>` to restrict extracted knowledge to that project. Files, manual text, and session digests all use the same extraction, evidence validation, reconciliation, embedding, and persistence pipeline. When both integrations are configured, ingest prefers Codex; `--provider codex|claude` selects one explicitly. `ragfy uninstall` removes the service startup registration and Ragfy hooks from both clients. It preserves the database, downloaded models, logs, and unrelated hook configuration.
 
 ## Models and local data
@@ -94,6 +96,7 @@ Set `RAGFY_HOME` to choose a different directory; the database will be created a
 ## Architecture and legacy files
 
 ```text
+SessionStart     -> provider hook -> bounded active project context -> session
 UserPromptSubmit -> provider hook -> local embeddings + hybrid search -> context + SQLite recall audit
 SessionEnd       -> provider hook -> digestion queue -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
 ingest           -> file or text -> preserve source -> extraction -> embedding -> reconciliation -> SQLite
