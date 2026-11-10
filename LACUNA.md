@@ -6,7 +6,7 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 | --- | --- | --- | --- |
 | Parcial | Inspecionar e pesquisar diretamente a base | `ragfy search` usa o mesmo retriever do hook, `status` expõe estatísticas agregadas e `sessions list|show` inspeciona sessões, fontes e registros; ainda falta uma visão geral de fontes não ligadas a sessões | Média |
 | Parcial | Remover ou corrigir conhecimento | `sessions forget` remove uma sessão transacionalmente e reativa dependentes; ainda não há correção ou remoção seletiva de uma fonte ou registro | Média |
-| Parcial | Avaliar o que o recall realmente injetou | `recalls list|show` preserva por prompt e sessão os resultados injetados e suas pontuações; ainda faltam veredito humano e persistência dos candidatos cortados | Alta |
+| Concluído | Avaliar o que o recall realmente injetou | `recalls list|show|explain` preserva por prompt e sessão os candidatos selecionados ou cortados, suas pontuações e o veredito útil ou irrelevante | Fechada |
 | Pendente | Calibrar relevância com evidência | Os limiares atuais estão fixos no código; o legado tinha probe, feedback e autotune | Alta |
 | Concluído | Ingestão idempotente sob demanda | Conteúdo inalterado não é extraído nem re-embeddado; uma versão alterada preserva a fonte anterior e aposenta seus registros. Ausência de arquivos não representa exclusão porque não existem raízes gerenciadas | Fechada |
 | Não portar | Recall para subagentes | O agente principal é responsável por fornecer o contexto necessário ao delegar; o Ragfy não registrará `SubagentStart` | Fora do escopo |
@@ -24,4 +24,4 @@ O runtime Go já cobre o núcleo do Ragfy: serviço persistente, hooks de recall
 
 ## Direção recomendada
 
-A memória de sessões já é observável e reversível por `sessions list|show|forget`, e os resultados efetivamente injetados já podem ser revisados por `recalls list|show`. A primeira versão será finalizada por três incrementos: marcar resultados como úteis ou irrelevantes, explicar candidatos, cortes e pontuações do recall, e carregar um contexto-base limitado do projeto no `SessionStart`.
+A memória de sessões já é observável e reversível por `sessions list|show|forget`, e o ciclo de auditoria do recall inclui candidatos, cortes, pontuações e feedback humano. Para finalizar a primeira versão, resta carregar um contexto-base limitado do projeto no `SessionStart`.

@@ -234,11 +234,17 @@ func (repository *Repository) RecordRecall(ctx context.Context, event knowledge.
 		return err
 	}
 	defer transaction.Rollback()
-	if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_events(id,session_id,source,project,prompt,created_at) VALUES(?,?,?,?,?,?)`, event.ID, event.SessionID, event.Source, event.Project, event.Prompt, event.CreatedAt); err != nil {
+	if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_events(id,session_id,source,project,prompt,created_at,score_cutoff,lexical_cutoff) VALUES(?,?,?,?,?,?,?,?)`, event.ID, event.SessionID, event.Source, event.Project, event.Prompt, event.CreatedAt, event.ScoreCutoff, event.LexicalCutoff); err != nil {
 		return err
 	}
 	for _, result := range event.Results {
-		if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_results(recall_id,rank,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, event.ID, result.Rank, result.SourceID, result.Title, result.Content, result.Kind, result.Scope, result.Project, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost); err != nil {
+		if result.Status == "" {
+			result.Status = "selected"
+		}
+		if result.Status == "selected" && result.SelectedRank == 0 {
+			result.SelectedRank = result.Rank
+		}
+		if _, err := transaction.ExecContext(ctx, `INSERT INTO recall_results(recall_id,rank,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost,selected_rank,status,feedback) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, event.ID, result.Rank, result.SourceID, result.Title, result.Content, result.Kind, result.Scope, result.Project, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost, result.SelectedRank, result.Status, result.Feedback); err != nil {
 			return err
 		}
 	}
@@ -246,7 +252,7 @@ func (repository *Repository) RecordRecall(ctx context.Context, event knowledge.
 }
 
 func (repository *Repository) RecallEvents(ctx context.Context) ([]knowledge.RecallEvent, error) {
-	rows, err := repository.database.QueryContext(ctx, `SELECT e.id,e.session_id,e.source,e.project,e.prompt,e.created_at,COUNT(r.rank) FROM recall_events e LEFT JOIN recall_results r ON r.recall_id=e.id GROUP BY e.id ORDER BY e.created_at DESC,e.id DESC`)
+	rows, err := repository.database.QueryContext(ctx, `SELECT e.id,e.session_id,e.source,e.project,e.prompt,e.created_at,e.score_cutoff,e.lexical_cutoff,COUNT(r.rank) FILTER (WHERE r.status='selected'),COUNT(r.rank) FROM recall_events e LEFT JOIN recall_results r ON r.recall_id=e.id GROUP BY e.id ORDER BY e.created_at DESC,e.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +260,7 @@ func (repository *Repository) RecallEvents(ctx context.Context) ([]knowledge.Rec
 	var events []knowledge.RecallEvent
 	for rows.Next() {
 		var event knowledge.RecallEvent
-		if err := rows.Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt, &event.ResultCount); err != nil {
+		if err := rows.Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt, &event.ScoreCutoff, &event.LexicalCutoff, &event.ResultCount, &event.CandidateCount); err != nil {
 			return nil, err
 		}
 		events = append(events, event)
@@ -264,27 +270,57 @@ func (repository *Repository) RecallEvents(ctx context.Context) ([]knowledge.Rec
 
 func (repository *Repository) RecallEvent(ctx context.Context, recallID string) (knowledge.RecallEvent, error) {
 	var event knowledge.RecallEvent
-	err := repository.database.QueryRowContext(ctx, `SELECT id,session_id,source,project,prompt,created_at FROM recall_events WHERE id=?`, recallID).Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt)
+	err := repository.database.QueryRowContext(ctx, `SELECT id,session_id,source,project,prompt,created_at,score_cutoff,lexical_cutoff FROM recall_events WHERE id=?`, recallID).Scan(&event.ID, &event.SessionID, &event.Source, &event.Project, &event.Prompt, &event.CreatedAt, &event.ScoreCutoff, &event.LexicalCutoff)
 	if errors.Is(err, sql.ErrNoRows) {
 		return event, knowledge.ErrNotFound
 	}
 	if err != nil {
 		return event, err
 	}
-	rows, err := repository.database.QueryContext(ctx, `SELECT rank,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost FROM recall_results WHERE recall_id=? ORDER BY rank`, recallID)
+	rows, err := repository.database.QueryContext(ctx, `SELECT rank,selected_rank,status,feedback,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost FROM recall_results WHERE recall_id=? ORDER BY rank`, recallID)
 	if err != nil {
 		return event, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var result knowledge.RecallResult
-		if err := rows.Scan(&result.Rank, &result.SourceID, &result.Title, &result.Content, &result.Kind, &result.Scope, &result.Project, &result.Score, &result.SemanticScore, &result.LexicalScore, &result.ProjectBoost); err != nil {
+		result, err := scanRecallResult(rows)
+		if err != nil {
 			return event, err
 		}
 		event.Results = append(event.Results, result)
 	}
-	event.ResultCount = len(event.Results)
+	for _, result := range event.Results {
+		if result.Status == "selected" {
+			event.ResultCount++
+		}
+	}
+	event.CandidateCount = len(event.Results)
 	return event, rows.Err()
+}
+
+func (repository *Repository) SetRecallFeedback(ctx context.Context, recallID string, rank int, feedback string) (knowledge.RecallResult, error) {
+	if feedback != "useful" && feedback != "irrelevant" {
+		return knowledge.RecallResult{}, errors.New("feedback must be useful or irrelevant")
+	}
+	result, err := repository.database.ExecContext(ctx, `UPDATE recall_results SET feedback=? WHERE recall_id=? AND rank=? AND status='selected'`, feedback, recallID, rank)
+	if err != nil {
+		return knowledge.RecallResult{}, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return knowledge.RecallResult{}, err
+	}
+	if updated == 0 {
+		return knowledge.RecallResult{}, knowledge.ErrNotFound
+	}
+	row := repository.database.QueryRowContext(ctx, `SELECT rank,selected_rank,status,feedback,source_id,title,content,kind,scope,project,score,semantic_score,lexical_score,project_boost FROM recall_results WHERE recall_id=? AND rank=?`, recallID, rank)
+	return scanRecallResult(row)
+}
+
+func scanRecallResult(scanner documentScanner) (knowledge.RecallResult, error) {
+	var result knowledge.RecallResult
+	err := scanner.Scan(&result.Rank, &result.SelectedRank, &result.Status, &result.Feedback, &result.SourceID, &result.Title, &result.Content, &result.Kind, &result.Scope, &result.Project, &result.Score, &result.SemanticScore, &result.LexicalScore, &result.ProjectBoost)
+	return result, err
 }
 
 func (repository *Repository) Documents(ctx context.Context) ([]knowledge.Document, error) {
@@ -562,10 +598,57 @@ func migrateSchema(database *sql.DB) error {
 			return err
 		}
 	}
+	if err := migrateColumns(database, "recall_events", map[string]string{
+		"score_cutoff":   "REAL NOT NULL DEFAULT 0",
+		"lexical_cutoff": "REAL NOT NULL DEFAULT 0",
+	}); err != nil {
+		return err
+	}
+	if err := migrateColumns(database, "recall_results", map[string]string{
+		"selected_rank": "INTEGER NOT NULL DEFAULT 0",
+		"status":        "TEXT NOT NULL DEFAULT 'selected'",
+		"feedback":      "TEXT NOT NULL DEFAULT ''",
+	}); err != nil {
+		return err
+	}
+	if _, err := database.Exec(`UPDATE recall_results SET selected_rank=rank WHERE status='selected' AND selected_rank=0`); err != nil {
+		return err
+	}
 	_, err = database.Exec(`CREATE INDEX IF NOT EXISTS docs_status_scope_project ON docs(status,scope,project);
 CREATE INDEX IF NOT EXISTS docs_origin ON docs(origin_id);
 CREATE INDEX IF NOT EXISTS knowledge_sources_key ON knowledge_sources(kind,source_key,project);`)
 	return err
+}
+
+func migrateColumns(database *sql.DB, table string, columns map[string]string) error {
+	rows, err := database.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	present := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		present[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for name, definition := range columns {
+		if present[name] {
+			continue
+		}
+		if _, err := database.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func encodeVector(vector []float32) []byte {

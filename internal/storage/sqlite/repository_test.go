@@ -50,6 +50,41 @@ scope TEXT NOT NULL, project TEXT NOT NULL, embedding BLOB, UNIQUE(source,source
 	}
 }
 
+func TestOpenMigratesExistingRecallAudit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "memory.sqlite")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`CREATE TABLE recall_events (
+id TEXT PRIMARY KEY, session_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
+project TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE recall_results (
+recall_id TEXT NOT NULL, rank INTEGER NOT NULL, source_id TEXT NOT NULL,
+title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
+scope TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', score REAL NOT NULL,
+semantic_score REAL NOT NULL, lexical_score REAL NOT NULL, project_boost REAL NOT NULL,
+PRIMARY KEY(recall_id,rank));
+INSERT INTO recall_events(id,source,prompt,created_at) VALUES('old-recall','codex','old prompt','2026-01-01T00:00:00Z');
+INSERT INTO recall_results(recall_id,rank,source_id,content,scope,score,semantic_score,lexical_score,project_boost) VALUES('old-recall',1,'old-record','old content','global',0.9,0.8,0.4,0);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := Open(Config{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+	event, err := repo.RecallEvent(context.Background(), "old-recall")
+	if err != nil || event.ResultCount != 1 || event.CandidateCount != 1 || len(event.Results) != 1 || event.Results[0].Status != "selected" || event.Results[0].SelectedRank != 1 {
+		t.Fatalf("migrated event=%#v err=%v", event, err)
+	}
+}
+
 func openTestRepository(t *testing.T) *Repository {
 	t.Helper()
 	repo, err := Open(Config{Path: filepath.Join(t.TempDir(), "memory.sqlite")})
@@ -272,7 +307,11 @@ func TestSessionsInspectAndForgetTransactionally(t *testing.T) {
 	}
 	event := knowledge.RecallEvent{
 		ID: "recall-one", SessionID: "new-session", Source: "claude", Project: "ragfy", Prompt: "what is new?", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		Results: []knowledge.RecallResult{{Rank: 1, SourceID: "new-record", Title: "New", Content: "new knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Score: .9, SemanticScore: .8, LexicalScore: .4, ProjectBoost: .05}},
+		ScoreCutoff: .7, LexicalCutoff: .5,
+		Results: []knowledge.RecallResult{
+			{Rank: 1, SourceID: "new-record", Title: "New", Content: "new knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Score: .9, SemanticScore: .8, LexicalScore: .4, ProjectBoost: .05},
+			{Rank: 2, Status: "cutoff", SourceID: "cut-record", Title: "Cut", Content: "cut knowledge", Kind: "fact", Scope: knowledge.ScopeProject, Project: "ragfy", Score: .4, SemanticScore: .5},
+		},
 	}
 	if err := repo.RecordRecall(ctx, event); err != nil {
 		t.Fatal(err)
@@ -287,12 +326,19 @@ func TestSessionsInspectAndForgetTransactionally(t *testing.T) {
 		t.Fatalf("detail=%#v err=%v", detail, err)
 	}
 	events, err := repo.RecallEvents(ctx)
-	if err != nil || len(events) != 1 || events[0].ResultCount != 1 {
+	if err != nil || len(events) != 1 || events[0].ResultCount != 1 || events[0].CandidateCount != 2 || events[0].ScoreCutoff != .7 {
 		t.Fatalf("events=%#v err=%v", events, err)
 	}
 	storedEvent, err := repo.RecallEvent(ctx, "recall-one")
-	if err != nil || len(storedEvent.Results) != 1 || storedEvent.Results[0].SourceID != "new-record" || storedEvent.Results[0].Score != .9 {
+	if err != nil || len(storedEvent.Results) != 2 || storedEvent.Results[0].SourceID != "new-record" || storedEvent.Results[0].Status != "selected" || storedEvent.Results[0].SelectedRank != 1 || storedEvent.Results[1].Status != "cutoff" {
 		t.Fatalf("event=%#v err=%v", storedEvent, err)
+	}
+	feedback, err := repo.SetRecallFeedback(ctx, "recall-one", 1, "useful")
+	if err != nil || feedback.Feedback != "useful" {
+		t.Fatalf("feedback=%#v err=%v", feedback, err)
+	}
+	if _, err := repo.SetRecallFeedback(ctx, "recall-one", 2, "irrelevant"); !errors.Is(err, knowledge.ErrNotFound) {
+		t.Fatalf("cut candidate accepted feedback: %v", err)
 	}
 
 	forgotten, err := repo.ForgetSession(ctx, "new-session")

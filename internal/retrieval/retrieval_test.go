@@ -114,6 +114,16 @@ func TestHybridSearchCutsTangentialRetrieverKnowledge(t *testing.T) {
 	if hits[0].LexicalScore <= hits[1].LexicalScore || hits[0].ProjectBoost != projectBoost {
 		t.Fatalf("unexpected score components: %#v", hits)
 	}
+	explanation, err := retriever.Explain(context.Background(), Query{Text: "melhorar o retriever do Ragfy", Vector: []float32{1, 0}, Limit: 4, Project: "ragfy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(explanation.Candidates) != 4 || len(explanation.Selected) != 2 || explanation.Candidates[0].Status != CandidateSelected || explanation.Candidates[1].Status != CandidateSelected || explanation.Candidates[2].Status != CandidateCutoff || explanation.Candidates[3].Status != CandidateCutoff {
+		t.Fatalf("explanation=%#v", explanation)
+	}
+	if explanation.ScoreCutoff <= explanation.Candidates[2].Hit.Score || explanation.LexicalCutoff <= 0 {
+		t.Fatalf("cutoffs not explained: %#v", explanation)
+	}
 }
 
 func TestHybridSearchIncludesGlobalAndCurrentProjectOnly(t *testing.T) {

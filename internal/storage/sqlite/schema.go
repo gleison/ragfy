@@ -17,12 +17,15 @@ CREATE TABLE IF NOT EXISTS digested_sessions (
  session_id TEXT PRIMARY KEY, transcript_hash TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS recall_events (
  id TEXT PRIMARY KEY, session_id TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
- project TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL, created_at TEXT NOT NULL);
+ project TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL, created_at TEXT NOT NULL,
+ score_cutoff REAL NOT NULL DEFAULT 0, lexical_cutoff REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS recall_results (
  recall_id TEXT NOT NULL, rank INTEGER NOT NULL, source_id TEXT NOT NULL,
  title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, kind TEXT NOT NULL DEFAULT '',
  scope TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', score REAL NOT NULL,
  semantic_score REAL NOT NULL, lexical_score REAL NOT NULL, project_boost REAL NOT NULL,
+ selected_rank INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'selected',
+ feedback TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(recall_id,rank));
 CREATE TABLE IF NOT EXISTS app_metadata (
  key TEXT PRIMARY KEY, value TEXT NOT NULL);

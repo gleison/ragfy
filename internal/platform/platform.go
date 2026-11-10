@@ -303,6 +303,11 @@ func RequestRecalls(recallID, listenAddress string) ([]byte, error) {
 	return requestServiceMethod(http.MethodGet, path, nil, listenAddress, 10*time.Second)
 }
 
+func RequestRecallFeedback(recallID string, rank int, feedback, listenAddress string) ([]byte, error) {
+	path := fmt.Sprintf("recalls/%s/results/%d/feedback", url.PathEscape(recallID), rank)
+	return requestServiceMethod(http.MethodPut, path, api.RecallFeedbackPayload{Feedback: feedback}, listenAddress, 10*time.Second)
+}
+
 func requestService(action string, payload any, listenAddress string, timeout time.Duration) ([]byte, error) {
 	return requestServiceMethod(http.MethodPost, action, payload, listenAddress, timeout)
 }

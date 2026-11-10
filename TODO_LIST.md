@@ -18,8 +18,8 @@
 - [x] Implementar busca direta pelo CLI usando o mesmo caminho de recuperação do hook (`ragfy search`).
 - [x] Registrar os resultados efetivamente injetados por recall, associados à sessão e ao prompt.
 - [x] Permitir revisar o histórico e as pontuações com `ragfy recalls list|show`.
-- [ ] Criar uma forma de marcar resultados como úteis ou irrelevantes.
-- [ ] Criar um comando de explicação do recall com candidatos, cortes e pontuações.
+- [x] Criar uma forma de marcar resultados como úteis ou irrelevantes.
+- [x] Criar um comando de explicação do recall com candidatos, cortes e pontuações.
 
 ## Integridade da ingestão
 

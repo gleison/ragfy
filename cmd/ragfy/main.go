@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -256,28 +257,44 @@ func writeSession(output io.Writer, session knowledge.Session) {
 
 func recallsCommand(arguments []string, output io.Writer) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: ragfy recalls list|show")
+		return errors.New("usage: ragfy recalls list|show|explain|feedback")
 	}
 	action := arguments[0]
 	remaining, asJSON, err := jsonCommandArguments(arguments[1:])
 	if err != nil {
 		return errors.New("run `ragfy help recalls` for usage")
 	}
-	recallID := ""
+	recallID, feedback := "", ""
+	rank := 0
 	switch action {
 	case "list":
 		if len(remaining) != 0 {
 			return errors.New("usage: ragfy recalls list [--json]")
 		}
-	case "show":
+	case "show", "explain":
 		if len(remaining) != 1 {
-			return errors.New("usage: ragfy recalls show <recall-id> [--json]")
+			return fmt.Errorf("usage: ragfy recalls %s <recall-id> [--json]", action)
 		}
 		recallID = remaining[0]
+	case "feedback":
+		if len(remaining) != 3 {
+			return errors.New("usage: ragfy recalls feedback <recall-id> <candidate-rank> useful|irrelevant [--json]")
+		}
+		recallID = remaining[0]
+		rank, err = strconv.Atoi(remaining[1])
+		feedback = remaining[2]
+		if err != nil || rank <= 0 || feedback != "useful" && feedback != "irrelevant" {
+			return errors.New("candidate rank must be positive and feedback must be useful or irrelevant")
+		}
 	default:
 		return fmt.Errorf("unknown recalls action %q", action)
 	}
-	body, err := platform.RequestRecalls(recallID, settings.ListenAddress)
+	var body []byte
+	if action == "feedback" {
+		body, err = platform.RequestRecallFeedback(recallID, rank, feedback, settings.ListenAddress)
+	} else {
+		body, err = platform.RequestRecalls(recallID, settings.ListenAddress)
+	}
 	if err != nil {
 		return err
 	}
@@ -295,8 +312,16 @@ func recallsCommand(arguments []string, output io.Writer) error {
 			return nil
 		}
 		for _, event := range events {
-			fmt.Fprintf(output, "%s  %s  session=%s results=%d  %s\n", event.ID, event.CreatedAt, event.SessionID, event.ResultCount, truncateLine(event.Prompt, 80))
+			fmt.Fprintf(output, "%s  %s  session=%s selected=%d candidates=%d  %s\n", event.ID, event.CreatedAt, event.SessionID, event.ResultCount, event.CandidateCount, truncateLine(event.Prompt, 80))
 		}
+		return nil
+	}
+	if action == "feedback" {
+		var result knowledge.RecallResult
+		if err := json.Unmarshal(body, &result); err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Marked candidate %d from recall %s as %s.\n", result.Rank, recallID, result.Feedback)
 		return nil
 	}
 	var event knowledge.RecallEvent
@@ -304,8 +329,21 @@ func recallsCommand(arguments []string, output io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(output, "Recall %s\nSession: %s\nSource: %s\nProject: %s\nCreated: %s\nPrompt: %s\n", event.ID, event.SessionID, event.Source, valueOrDash(event.Project), event.CreatedAt, event.Prompt)
+	if action == "explain" {
+		fmt.Fprintf(output, "Candidates: %d; selected: %d; score cutoff: %.4f; lexical-match score cutoff: %.4f\n", event.CandidateCount, event.ResultCount, event.ScoreCutoff, event.LexicalCutoff)
+	}
 	for _, result := range event.Results {
-		fmt.Fprintf(output, "\n[%d] %s (%s, %s)\nscore=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f\n%s\n", result.Rank, result.Title, result.Kind, result.SourceID, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost, result.Content)
+		if action == "show" && result.Status != "selected" {
+			continue
+		}
+		status := result.Status
+		if result.SelectedRank > 0 {
+			status += fmt.Sprintf(" selected_rank=%d", result.SelectedRank)
+		}
+		if result.Feedback != "" {
+			status += " feedback=" + result.Feedback
+		}
+		fmt.Fprintf(output, "\n[%d] %s (%s, %s)\nstatus=%s score=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f\n%s\n", result.Rank, result.Title, result.Kind, result.SourceID, status, result.Score, result.SemanticScore, result.LexicalScore, result.ProjectBoost, result.Content)
 	}
 	return nil
 }
@@ -583,9 +621,11 @@ records that were superseded by knowledge from the forgotten session.
 		"recalls": `Usage:
   ragfy recalls list [--json]
   ragfy recalls show <recall-id> [--json]
+  ragfy recalls explain <recall-id> [--json]
+  ragfy recalls feedback <recall-id> <candidate-rank> useful|irrelevant [--json]
 
-Review prompt recalls recorded by hooks, including the exact selected memories
-and their semantic, lexical, project, and final ranking scores.
+Review prompt recalls recorded by hooks, explain selected and cut candidates
+with their ranking scores, and mark an injected result as useful or irrelevant.
 `,
 		"ingest": `Usage:
   ragfy ingest [--project <name>] [--provider codex|claude] <path>

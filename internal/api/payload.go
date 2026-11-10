@@ -23,3 +23,7 @@ type IngestPayload struct {
 	Project  string `json:"project,omitempty"`
 	Provider string `json:"provider,omitempty"`
 }
+
+type RecallFeedbackPayload struct {
+	Feedback string `json:"feedback"`
+}

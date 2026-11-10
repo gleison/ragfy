@@ -116,6 +116,9 @@ type ForgetResult struct {
 
 type RecallResult struct {
 	Rank          int     `json:"rank"`
+	SelectedRank  int     `json:"selected_rank,omitempty"`
+	Status        string  `json:"status"`
+	Feedback      string  `json:"feedback,omitempty"`
 	SourceID      string  `json:"source_id"`
 	Title         string  `json:"title"`
 	Content       string  `json:"content"`
@@ -129,14 +132,17 @@ type RecallResult struct {
 }
 
 type RecallEvent struct {
-	ID          string         `json:"id"`
-	SessionID   string         `json:"session_id,omitempty"`
-	Source      string         `json:"source"`
-	Project     string         `json:"project,omitempty"`
-	Prompt      string         `json:"prompt"`
-	CreatedAt   string         `json:"created_at"`
-	ResultCount int            `json:"result_count"`
-	Results     []RecallResult `json:"results,omitempty"`
+	ID             string         `json:"id"`
+	SessionID      string         `json:"session_id,omitempty"`
+	Source         string         `json:"source"`
+	Project        string         `json:"project,omitempty"`
+	Prompt         string         `json:"prompt"`
+	CreatedAt      string         `json:"created_at"`
+	ResultCount    int            `json:"result_count"`
+	CandidateCount int            `json:"candidate_count"`
+	ScoreCutoff    float64        `json:"score_cutoff"`
+	LexicalCutoff  float64        `json:"lexical_cutoff"`
+	Results        []RecallResult `json:"results,omitempty"`
 }
 
 type Repository interface {
@@ -157,4 +163,5 @@ type Repository interface {
 	RecordRecall(context.Context, RecallEvent) error
 	RecallEvents(context.Context) ([]RecallEvent, error)
 	RecallEvent(context.Context, string) (RecallEvent, error)
+	SetRecallFeedback(context.Context, string, int, string) (RecallResult, error)
 }

@@ -176,6 +176,9 @@ func TestRecallAuditAndSessionRoutes(t *testing.T) {
 	if err := repo.CommitSession(ctx, knowledge.SessionCommit{SessionID: "session-one", TranscriptHash: "hash", Source: source, Documents: []knowledge.Document{document}}); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.Upsert(ctx, knowledge.Document{Source: "manual", SourceID: "tangential", Title: "Tangential note", Content: "An unrelated operational note.", Kind: "fact", Scope: knowledge.ScopeGlobal, Vector: []float32{0.6, 0.8}}); err != nil {
+		t.Fatal(err)
+	}
 	service := newTestService(repo, repo, &fakeModelEngine{}, 1)
 	handler := service.Routes("secret")
 	recall := requestJSON(t, handler, http.MethodPost, "/recall", "secret", api.HookPayload{Source: "codex", SessionID: "session-one", Prompt: "How are selected recall results recorded?", CWD: "/workspace/ragfy"})
@@ -184,13 +187,21 @@ func TestRecallAuditAndSessionRoutes(t *testing.T) {
 	}
 	list := requestJSON(t, handler, http.MethodGet, "/recalls", "secret", nil)
 	var events []knowledge.RecallEvent
-	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &events) != nil || len(events) != 1 || events[0].SessionID != "session-one" || events[0].ResultCount != 1 {
+	if list.Code != http.StatusOK || json.Unmarshal(list.Body.Bytes(), &events) != nil || len(events) != 1 || events[0].SessionID != "session-one" || events[0].ResultCount != 1 || events[0].CandidateCount != 2 {
 		t.Fatalf("recalls=%d %s", list.Code, list.Body.String())
 	}
 	detail := requestJSON(t, handler, http.MethodGet, "/recalls/"+events[0].ID, "secret", nil)
 	var event knowledge.RecallEvent
-	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &event) != nil || len(event.Results) != 1 || event.Results[0].SourceID != "remembered" {
+	if detail.Code != http.StatusOK || json.Unmarshal(detail.Body.Bytes(), &event) != nil || len(event.Results) != 2 || event.Results[0].SourceID != "remembered" || event.Results[0].Status != "selected" || event.Results[1].Status != "cutoff" {
 		t.Fatalf("recall detail=%d %s", detail.Code, detail.Body.String())
+	}
+	feedback := requestJSON(t, handler, http.MethodPut, "/recalls/"+events[0].ID+"/results/1/feedback", "secret", api.RecallFeedbackPayload{Feedback: "useful"})
+	if feedback.Code != http.StatusOK || !strings.Contains(feedback.Body.String(), `"feedback":"useful"`) {
+		t.Fatalf("feedback=%d %s", feedback.Code, feedback.Body.String())
+	}
+	cutFeedback := requestJSON(t, handler, http.MethodPut, "/recalls/"+events[0].ID+"/results/2/feedback", "secret", api.RecallFeedbackPayload{Feedback: "irrelevant"})
+	if cutFeedback.Code != http.StatusNotFound {
+		t.Fatalf("cut feedback=%d %s", cutFeedback.Code, cutFeedback.Body.String())
 	}
 	sessions := requestJSON(t, handler, http.MethodGet, "/sessions", "secret", nil)
 	if sessions.Code != http.StatusOK || !strings.Contains(sessions.Body.String(), "session-one") {

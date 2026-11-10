@@ -48,12 +48,17 @@ func NewHybrid(corpus Corpus) *Hybrid {
 }
 
 func (retriever *Hybrid) Search(ctx context.Context, query Query) ([]knowledge.Hit, error) {
+	explanation, err := retriever.Explain(ctx, query)
+	return explanation.Selected, err
+}
+
+func (retriever *Hybrid) Explain(ctx context.Context, query Query) (Explanation, error) {
 	if query.Limit <= 0 {
-		return nil, nil
+		return Explanation{}, nil
 	}
 	documents, err := retriever.corpus.SearchableDocuments(ctx)
 	if err != nil {
-		return nil, err
+		return Explanation{}, err
 	}
 	documents = visibleDocuments(documents, query.Project)
 	lexicalScores := bm25Scores(queryTermsForProject(query.Text, query.Project), documents)
@@ -80,10 +85,11 @@ func (retriever *Hybrid) Search(ctx context.Context, query Query) ([]knowledge.H
 	if len(candidates) > maximumCandidates {
 		candidates = candidates[:maximumCandidates]
 	}
-	eligible := relativelyRelevant(candidates)
+	eligible, scoreCutoff, lexicalCutoff := relativelyRelevant(candidates)
 	selected := diverseHits(eligible, query.Limit)
-	logRanking(query.Project, candidates, eligible, selected)
-	return selected, nil
+	explanation := explainCandidates(candidates, eligible, selected, scoreCutoff, lexicalCutoff)
+	logRanking(query.Project, explanation)
+	return explanation, nil
 }
 
 func visibleDocuments(documents []knowledge.Document, project string) []knowledge.Document {
@@ -100,9 +106,9 @@ func candidateIsRelevant(semanticScore, lexicalScore float64) bool {
 	return semanticScore >= 0.32 && (semanticScore >= 0.45 || lexicalScore >= 0.12) || lexicalScore >= 0.55
 }
 
-func relativelyRelevant(candidates []knowledge.Hit) []knowledge.Hit {
+func relativelyRelevant(candidates []knowledge.Hit) ([]knowledge.Hit, float64, float64) {
 	if len(candidates) == 0 {
-		return nil
+		return nil, minimumScore, minimumScore
 	}
 	cutoff := math.Max(minimumScore, candidates[0].Score*relativeCutoff)
 	lexicalThreshold := math.Max(minimumScore, candidates[0].Score*lexicalCutoff)
@@ -112,7 +118,29 @@ func relativelyRelevant(candidates []knowledge.Hit) []knowledge.Hit {
 			eligible = append(eligible, candidate)
 		}
 	}
-	return eligible
+	return eligible, cutoff, lexicalThreshold
+}
+
+func explainCandidates(candidates, eligible, selected []knowledge.Hit, scoreCutoff, lexicalCutoff float64) Explanation {
+	eligibleIDs := hitIDs(eligible)
+	selectedRanks := make(map[string]int, len(selected))
+	for index, hit := range selected {
+		selectedRanks[hit.Doc.Source+"\n"+hit.Doc.SourceID] = index + 1
+	}
+	explanation := Explanation{Selected: selected, ScoreCutoff: scoreCutoff, LexicalCutoff: lexicalCutoff}
+	for index, hit := range candidates {
+		key := hit.Doc.Source + "\n" + hit.Doc.SourceID
+		candidate := Candidate{Rank: index + 1, Status: CandidateCutoff, Hit: hit}
+		if eligibleIDs[key] {
+			candidate.Status = CandidateEligible
+		}
+		if selectedRank := selectedRanks[key]; selectedRank > 0 {
+			candidate.Status = CandidateSelected
+			candidate.SelectedRank = selectedRank
+		}
+		explanation.Candidates = append(explanation.Candidates, candidate)
+	}
+	return explanation
 }
 
 func diverseHits(candidates []knowledge.Hit, limit int) []knowledge.Hit {
@@ -282,21 +310,13 @@ func sortHits(hits []knowledge.Hit) {
 	}
 }
 
-func logRanking(project string, candidates, eligible, selected []knowledge.Hit) {
-	log.Printf("recall ranking project=%s candidates=%d eligible=%d selected=%d", project, len(candidates), len(eligible), len(selected))
-	eligibleIDs := hitIDs(eligible)
-	selectedIDs := hitIDs(selected)
-	for rank, hit := range candidates {
-		status := "cutoff"
-		if eligibleIDs[hit.Doc.Source+"\n"+hit.Doc.SourceID] {
-			status = "eligible"
-		}
-		if selectedIDs[hit.Doc.Source+"\n"+hit.Doc.SourceID] {
-			status = "selected"
-		}
-		log.Printf("recall candidate_rank=%d source_id=%s kind=%s scope=%s status=%s score=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f", rank+1, hit.Doc.SourceID, hit.Doc.Kind, hit.Doc.Scope, status, hit.Score, hit.SemanticScore, hit.LexicalScore, hit.ProjectBoost)
+func logRanking(project string, explanation Explanation) {
+	log.Printf("recall ranking project=%s candidates=%d selected=%d score_cutoff=%.4f lexical_cutoff=%.4f", project, len(explanation.Candidates), len(explanation.Selected), explanation.ScoreCutoff, explanation.LexicalCutoff)
+	for _, candidate := range explanation.Candidates {
+		hit := candidate.Hit
+		log.Printf("recall candidate_rank=%d source_id=%s kind=%s scope=%s status=%s selected_rank=%d score=%.4f semantic=%.4f lexical=%.4f project_boost=%.2f", candidate.Rank, hit.Doc.SourceID, hit.Doc.Kind, hit.Doc.Scope, candidate.Status, candidate.SelectedRank, hit.Score, hit.SemanticScore, hit.LexicalScore, hit.ProjectBoost)
 	}
-	for rank, hit := range selected {
+	for rank, hit := range explanation.Selected {
 		log.Printf("recall selected_rank=%d source_id=%s", rank+1, hit.Doc.SourceID)
 	}
 }
