@@ -462,8 +462,8 @@ func serve() (resultErr error) {
 	defer repository.Close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	log.Println("initializing local embedding model; missing model files will be downloaded")
-	embedder, err := model.NewEmbeddingLlamaWithConfig(ctx, filepath.Join(dataDirectory, "models"), configuration.Embedding)
+	log.Println("initializing local models; missing model files will be downloaded")
+	embedder, err := model.NewLlamaWithConfig(ctx, filepath.Join(dataDirectory, "models"), configuration)
 	if err != nil {
 		log.Printf("startup failed: %v", err)
 		return err
@@ -474,44 +474,17 @@ func serve() (resultErr error) {
 		log.Printf("startup failed: %v", err)
 		return err
 	}
-	agentDirectory := filepath.Join(dataDirectory, "agent-exec")
-	if err := os.MkdirAll(agentDirectory, 0700); err != nil {
+	extractor, reconciler, err := knowledgePipeline(dataDirectory, configuration, embedder)
+	if err != nil {
 		return err
 	}
-	schemaPath := filepath.Join(agentDirectory, "digest.schema.json")
-	if err := os.WriteFile(schemaPath, []byte(digest.JSONSchema+"\n"), 0600); err != nil {
-		return err
-	}
-	reconciliationSchemaPath := filepath.Join(agentDirectory, "reconciliation.schema.json")
-	if err := os.WriteFile(reconciliationSchemaPath, []byte(reconciliation.JSONSchema+"\n"), 0600); err != nil {
-		return err
-	}
-	extractors := map[string]extraction.Extractor{}
-	reconcilers := map[string]reconciliation.Reconciler{}
-	if configuration.Enabled("codex") {
-		codexExecutable, executableErr := findAgentExecutable("codex")
-		if executableErr != nil {
-			return executableErr
-		}
-		extractors["codex"] = extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath))
-		reconcilers["codex"] = reconciliation.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, reconciliationSchemaPath))
-	}
-	if configuration.Enabled("claude") {
-		claudeExecutable, executableErr := findAgentExecutable("claude")
-		if executableErr != nil {
-			return executableErr
-		}
-		extractors["claude"] = extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema))
-		reconcilers["claude"] = reconciliation.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, reconciliation.JSONSchema))
-	}
-	extractor := extraction.NewRouter(extractors)
-	reconciler := reconciliation.NewRouter(reconcilers)
 	applicationService := service.New(service.Dependencies{
-		Repository: repository,
-		Embedder:   embedder,
-		Extractor:  extractor,
-		Retriever:  retrieval.NewHybrid(repository),
-		Reconciler: reconciler,
+		Repository:        repository,
+		Embedder:          embedder,
+		Extractor:         extractor,
+		Retriever:         retrieval.NewHybrid(repository),
+		Reconciler:        reconciler,
+		DeduplicateSource: configuration.Generation != nil,
 		Runtime: service.RuntimeInfo{
 			Version: buildinfo.DisplayVersion(),
 			Model:   configuration.Embedding.Name(),
@@ -532,6 +505,49 @@ func serve() (resultErr error) {
 		return nil
 	}
 	return err
+}
+
+func knowledgePipeline(dataDirectory string, configuration appconfig.Config, generator model.Generator) (extraction.Extractor, reconciliation.Reconciler, error) {
+	extractors := map[string]extraction.Extractor{}
+	reconcilers := map[string]reconciliation.Reconciler{}
+	if configuration.Generation != nil {
+		localExtractor := extraction.NewLocalGenerative(generator)
+		localReconciler := reconciliation.NewGenerative(generator)
+		for _, source := range configuration.Integrations {
+			extractors[source] = localExtractor
+			reconcilers[source] = localReconciler
+		}
+		return extraction.NewRouter(extractors), reconciliation.NewRouter(reconcilers), nil
+	}
+	agentDirectory := filepath.Join(dataDirectory, "agent-exec")
+	if err := os.MkdirAll(agentDirectory, 0700); err != nil {
+		return nil, nil, err
+	}
+	schemaPath := filepath.Join(agentDirectory, "digest.schema.json")
+	if err := os.WriteFile(schemaPath, []byte(digest.JSONSchema+"\n"), 0600); err != nil {
+		return nil, nil, err
+	}
+	reconciliationSchemaPath := filepath.Join(agentDirectory, "reconciliation.schema.json")
+	if err := os.WriteFile(reconciliationSchemaPath, []byte(reconciliation.JSONSchema+"\n"), 0600); err != nil {
+		return nil, nil, err
+	}
+	if configuration.Enabled("codex") {
+		codexExecutable, executableErr := findAgentExecutable("codex")
+		if executableErr != nil {
+			return nil, nil, executableErr
+		}
+		extractors["codex"] = extraction.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, schemaPath))
+		reconcilers["codex"] = reconciliation.NewGenerative(model.NewCodexGenerator(codexExecutable, agentDirectory, reconciliationSchemaPath))
+	}
+	if configuration.Enabled("claude") {
+		claudeExecutable, executableErr := findAgentExecutable("claude")
+		if executableErr != nil {
+			return nil, nil, executableErr
+		}
+		extractors["claude"] = extraction.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, digest.JSONSchema))
+		reconcilers["claude"] = reconciliation.NewGenerative(model.NewClaudeGenerator(claudeExecutable, agentDirectory, reconciliation.JSONSchema))
+	}
+	return extraction.NewRouter(extractors), reconciliation.NewRouter(reconcilers), nil
 }
 
 func findAgentExecutable(name string) (string, error) {
@@ -671,8 +687,9 @@ func writeCommandHelp(output io.Writer, command string) bool {
   ragfy setup
   ragfy setup hooks
 
-Run interactive setup. It validates the embedding model and selected
-clients, updates hooks, installs the background service, and waits for health.
+Run interactive setup. Choose harness or local knowledge generation.
+Setup validates the configured models and clients, updates hooks, installs the
+background service, and waits for health.
 Use 'ragfy setup hooks' to reapply the saved integration selection without
 running interactive setup again.
 `,

@@ -48,6 +48,15 @@ func (reconciler *Generative) Reconcile(ctx context.Context, request Request) ([
 }
 
 func reconciliationPrompt(request Request) string {
+	if request.WithinSource {
+		return fmt.Sprintf(`Compare the two records extracted from the same source. Are they paraphrases of the same durable claim? Return {"actions":[{"new_source_id":%q,"existing_source_id":%q,"relation":"duplicate"}]} if they make the same claim. A paraphrase may omit an implementation detail without changing the central claim. If the records are complementary, distinct, conflicting, or uncertain, return {"actions":[]}. Return JSON only.
+
+First record:
+%s
+
+Second record:
+%s`, request.New[0].SourceID, request.Existing[0].SourceID, formatDocuments(request.New), formatDocuments(request.Existing))
+	}
 	return fmt.Sprintf(`Reconcile newly extracted durable knowledge with active knowledge from earlier sources. Return only a JSON object with one actions array. Each action must identify one new_source_id, one existing_source_id, and relation "duplicate" or "supersedes".
 
 Use "duplicate" only when both records express the same durable claim. Use "supersedes" only when the new record gives a confirmed, incompatible newer state for the same subject and attribute. Do not emit actions for complementary knowledge, merely related subjects, uncertain conflicts, or independent problem occurrences. The application validates chronology, scope, project, kind, evidence, and acceptance separately. Prefer no action when uncertain. Never relate records with different kinds, scopes, or projects.
@@ -86,6 +95,9 @@ func parseActions(response string, request Request) ([]Action, error) {
 	if err := json.Unmarshal([]byte(response), &payload); err != nil {
 		return nil, err
 	}
+	if request.WithinSource && payload.Actions == nil {
+		return nil, errors.New("same-source comparison requires an actions array")
+	}
 	newByID := documentsByID(request.New)
 	existingByID := documentsByID(request.Existing)
 	seen := make(map[string]bool)
@@ -96,7 +108,7 @@ func parseActions(response string, request Request) ([]Action, error) {
 		if !newExists || !existingExists {
 			return nil, errors.New("action references an unknown record")
 		}
-		if raw.Relation != RelationDuplicate && raw.Relation != RelationSupersedes {
+		if raw.Relation != RelationDuplicate && (raw.Relation != RelationSupersedes || request.WithinSource) {
 			return nil, fmt.Errorf("invalid relation %q", raw.Relation)
 		}
 		if newDocument.Kind == "problem" || !compatible(newDocument, existingDocument) {

@@ -20,6 +20,9 @@ const (
 	DefaultEmbeddingSHA256  = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439"
 	DefaultEmbeddingPooling = "last"
 	DefaultQueryInstruction = "Instruct: Given a coding assistant prompt, retrieve relevant passages from the user's knowledge base that help answer the prompt.\nQuery: "
+	DefaultGenerationModel  = "qwen3:4b-instruct-2507-q8_0"
+	DefaultGenerationURI    = "hf://ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF/qwen3-4b-instruct-2507-q8_0.gguf"
+	DefaultGenerationSHA256 = "ae916ede1c010a26955ee8ae2e908bf8815a3f135ec860439ab924701c69d5f1"
 )
 
 var ErrNotConfigured = errors.New("Ragfy has not been configured; run `ragfy setup` to get started")
@@ -32,9 +35,23 @@ type EmbeddingConfig struct {
 }
 
 type Config struct {
-	Version      int             `json:"version"`
-	Embedding    EmbeddingConfig `json:"embedding"`
-	Integrations []string        `json:"integrations"`
+	Version      int               `json:"version"`
+	Embedding    EmbeddingConfig   `json:"embedding"`
+	Integrations []string          `json:"integrations"`
+	Generation   *GenerationConfig `json:"generation,omitempty"`
+}
+
+type GenerationConfig struct {
+	URI    string `json:"uri"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+func DefaultGenerationConfig() GenerationConfig {
+	return GenerationConfig{URI: DefaultGenerationURI, SHA256: DefaultGenerationSHA256}
+}
+
+func (config GenerationConfig) Name() string {
+	return modelName(config.URI)
 }
 
 func Default() Config {
@@ -50,23 +67,8 @@ func CustomEmbeddingConfig(uri string) EmbeddingConfig {
 }
 
 func (config EmbeddingConfig) Validate() error {
-	if strings.TrimSpace(config.URI) == "" {
-		return errors.New("embedding model URI is required")
-	}
-	parsed, err := url.Parse(config.URI)
-	if err != nil || (parsed.Scheme != "hf" && parsed.Scheme != "https") {
-		return errors.New("embedding model URI must use hf:// or https://")
-	}
-	if !strings.HasSuffix(strings.ToLower(parsed.Path), ".gguf") {
-		return errors.New("embedding model URI must point to a .gguf file")
-	}
-	if config.SHA256 != "" {
-		if len(config.SHA256) != 64 {
-			return errors.New("embedding model SHA-256 must contain 64 hexadecimal characters")
-		}
-		if _, err := hex.DecodeString(config.SHA256); err != nil {
-			return errors.New("embedding model SHA-256 is not hexadecimal")
-		}
+	if err := validateGGUF(config.URI, config.SHA256); err != nil {
+		return fmt.Errorf("embedding model: %w", err)
 	}
 	switch config.Pooling {
 	case "", "auto", "none", "mean", "cls", "last", "rank":
@@ -77,11 +79,31 @@ func (config EmbeddingConfig) Validate() error {
 }
 
 func (config EmbeddingConfig) Name() string {
-	parsed, err := url.Parse(config.URI)
+	return modelName(config.URI)
+}
+
+func validateGGUF(uri, sha string) error {
+	parsed, err := url.Parse(uri)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "hf" && parsed.Scheme != "https") {
+		return errors.New("URI must use hf:// or https://")
+	}
+	if !strings.HasSuffix(strings.ToLower(parsed.Path), ".gguf") {
+		return errors.New("URI must point to a .gguf file")
+	}
+	if sha != "" {
+		if _, err := hex.DecodeString(sha); len(sha) != 64 || err != nil {
+			return errors.New("SHA-256 must contain 64 hexadecimal characters")
+		}
+	}
+	return nil
+}
+
+func modelName(uri string) string {
+	parsed, err := url.Parse(uri)
 	if err == nil {
 		return path.Base(parsed.Path)
 	}
-	return path.Base(config.URI)
+	return path.Base(uri)
 }
 
 func (config EmbeddingConfig) ModelVersion() string {
@@ -152,6 +174,14 @@ func (value Config) Validate() error {
 	}
 	if err := value.Embedding.Validate(); err != nil {
 		return err
+	}
+	if value.Generation != nil {
+		if err := validateGGUF(value.Generation.URI, value.Generation.SHA256); err != nil {
+			return fmt.Errorf("local generation model: %w", err)
+		}
+		if strings.EqualFold(value.Generation.Name(), value.Embedding.Name()) {
+			return errors.New("embedding and generation models must have distinct GGUF filenames")
+		}
 	}
 	if len(value.Integrations) == 0 {
 		return errors.New("select at least one integration")

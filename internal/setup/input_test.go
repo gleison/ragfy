@@ -31,7 +31,29 @@ func TestSetupKeepsDefaultsOnBlankInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Embedding.URI != appconfig.DefaultEmbeddingURI || len(result.Integrations) != 2 {
+	if result.Embedding.URI != appconfig.DefaultEmbeddingURI || len(result.Integrations) != 2 || result.Generation != nil {
 		t.Fatalf("defaults were not preserved: %#v", result)
+	}
+}
+
+func TestSetupSelectsAndRetainsLocalGeneration(t *testing.T) {
+	var output bytes.Buffer
+	result, err := askConfiguration(strings.NewReader("\n\nlocal\n\n"), &output, appconfig.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Generation == nil || *result.Generation != appconfig.DefaultGenerationConfig() {
+		t.Fatalf("default local model = %#v", result.Generation)
+	}
+	if !strings.Contains(output.String(), appconfig.DefaultGenerationModel) {
+		t.Fatal("setup did not suggest the Qwen3 model")
+	}
+	custom, err := askConfiguration(strings.NewReader("\n\n\nhf://example/model/custom.gguf\n"), &output, result)
+	if err != nil || custom.Generation == nil || custom.Generation.Name() != "custom.gguf" {
+		t.Fatalf("custom local model = %#v, error = %v", custom.Generation, err)
+	}
+	harness, err := askConfiguration(strings.NewReader("\n\nharness\n"), &output, custom)
+	if err != nil || harness.Generation != nil {
+		t.Fatalf("harness selection = %#v, error = %v", harness.Generation, err)
 	}
 }

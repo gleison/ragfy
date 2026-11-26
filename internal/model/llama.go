@@ -13,18 +13,16 @@ import (
 
 	llama "github.com/mutablelogic/go-llama/pkg/llamacpp"
 	"github.com/mutablelogic/go-llama/pkg/llamacpp/schema"
+	"github.com/mutablelogic/go-llama/pkg/llamacpp/store"
 	llamasys "github.com/mutablelogic/go-llama/sys/llamacpp"
 
 	appconfig "ragfy/internal/config"
 )
 
 const (
-	chatModel         = "Qwen3-4B-Q4_K_M.gguf"
-	chatURL           = "hf://Qwen/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf"
-	chatSHA256        = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
-	chatContextSize   = 4096
+	chatContextSize   = 32768
 	chatBatchSize     = 2048
-	chatOutputTokens  = 1200
+	chatOutputTokens  = 4096
 	embedContextSize  = 512
 	maximumEmbedChars = 1400
 )
@@ -32,6 +30,7 @@ const (
 type Llama struct {
 	runtime          *llama.Llama
 	chatName         string
+	chatSHA256       string
 	embedName        string
 	embedSHA256      string
 	pooling          string
@@ -42,8 +41,10 @@ var _ Embedder = (*Llama)(nil)
 var _ Generator = (*Llama)(nil)
 
 func NewLlama(ctx context.Context, directory string) (*Llama, error) {
-	config := appconfig.DefaultEmbeddingConfig()
-	return newLlama(ctx, directory, modelSpecifications(config), []string{chatModel, config.Name()}, chatModel, config)
+	config := appconfig.Default()
+	generation := appconfig.DefaultGenerationConfig()
+	config.Generation = &generation
+	return NewLlamaWithConfig(ctx, directory, config)
 }
 
 func NewEmbeddingLlama(ctx context.Context, directory string) (*Llama, error) {
@@ -54,7 +55,14 @@ func NewEmbeddingLlamaWithConfig(ctx context.Context, directory string, config a
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	return newLlama(ctx, directory, []modelSpecification{embeddingModelSpecification(config)}, []string{config.Name()}, "", config)
+	return newLlama(ctx, directory, config, nil)
+}
+
+func NewLlamaWithConfig(ctx context.Context, directory string, config appconfig.Config) (*Llama, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return newLlama(ctx, directory, config.Embedding, config.Generation)
 }
 
 type modelSpecification struct {
@@ -63,7 +71,7 @@ type modelSpecification struct {
 	sha256 string
 }
 
-func newLlama(ctx context.Context, directory string, specifications []modelSpecification, loadNames []string, chatName string, embedConfig appconfig.EmbeddingConfig) (*Llama, error) {
+func newLlama(ctx context.Context, directory string, embedConfig appconfig.EmbeddingConfig, generation *appconfig.GenerationConfig) (*Llama, error) {
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		return nil, err
 	}
@@ -71,59 +79,89 @@ func newLlama(ctx context.Context, directory string, specifications []modelSpeci
 	if err != nil {
 		return nil, err
 	}
-	engine := &Llama{runtime: runtime, chatName: chatName, embedName: embedConfig.Name(), pooling: embedConfig.Pooling, queryInstruction: embedConfig.QueryInstruction}
-	for _, specification := range specifications {
-		modelFile, modelErr := runtime.GetModel(ctx, specification.name)
-		if modelErr == nil {
-			modelPath := filepath.Join(runtime.Store.Path(), modelFile.Path)
-			if verificationErr := verifyFile(modelPath, specification.sha256); verificationErr != nil {
-				_ = os.Remove(modelPath)
-				modelErr = verificationErr
-			}
+	engine := &Llama{runtime: runtime, embedName: embedConfig.Name(), pooling: embedConfig.Pooling, queryInstruction: embedConfig.QueryInstruction}
+	specifications := []modelSpecification{{engine.embedName, embedConfig.URI, embedConfig.SHA256}}
+	if generation != nil {
+		client, err := store.NewClient()
+		if err == nil {
+			engine.chatName, err = client.GetDestPath(generation.URI)
 		}
-		if modelErr != nil {
-			log.Printf("startup: downloading model %s", specification.name)
-			lastPercentage := -1
-			modelFile, err = runtime.PullModel(ctx, schema.PullModelRequest{URL: specification.url}, func(_ string, downloaded, total uint64) error {
-				if total > 0 {
-					percentage := int(downloaded * 100 / total)
-					if percentage > lastPercentage {
-						lastPercentage = percentage
-						log.Printf("startup: download %s: %d%%", specification.name, percentage)
-					}
-				}
-				return nil
-			})
-			if err != nil {
-				runtime.Close()
-				return nil, fmt.Errorf("download %s: %w", specification.name, err)
-			}
-		}
-		modelPath := filepath.Join(runtime.Store.Path(), modelFile.Path)
-		if err = verifyFile(modelPath, specification.sha256); err != nil {
-			_ = os.Remove(modelPath)
+		if err != nil {
 			runtime.Close()
-			return nil, fmt.Errorf("modelo %s inválido: %w", specification.name, err)
+			return nil, fmt.Errorf("resolve local generation model path: %w", err)
 		}
-		actualSHA256, hashErr := fileSHA256(modelPath)
-		if hashErr != nil {
-			runtime.Close()
-			return nil, hashErr
-		}
-		if specification.name == embedConfig.Name() {
-			engine.embedSHA256 = actualSHA256
-		}
-		log.Printf("startup: verified model %s", specification.name)
+		specifications = append(specifications, modelSpecification{engine.chatName, generation.URI, generation.SHA256})
 	}
-	for _, name := range loadNames {
-		log.Printf("startup: loading model %s", name)
-		if _, err := runtime.LoadModel(ctx, schema.LoadModelRequest{Name: name}); err != nil {
+	for _, specification := range specifications {
+		actualSHA256, err := prepareModel(ctx, runtime, specification)
+		if err != nil {
 			runtime.Close()
-			return nil, fmt.Errorf("load %s: %w", name, err)
+			return nil, err
+		}
+		if specification.name == engine.embedName {
+			engine.embedSHA256 = actualSHA256
+		} else {
+			engine.chatSHA256 = actualSHA256
 		}
 	}
 	log.Println("startup: models loaded")
 	return engine, nil
+}
+
+func prepareModel(ctx context.Context, runtime *llama.Llama, specification modelSpecification) (string, error) {
+	checksum, err := cachedModelChecksum(ctx, runtime, specification)
+	if err != nil {
+		checksum, err = downloadModel(ctx, runtime, specification)
+		if err != nil {
+			return "", err
+		}
+	}
+	log.Printf("startup: verified model %s", specification.name)
+	log.Printf("startup: loading model %s", specification.name)
+	if _, err := runtime.LoadModel(ctx, schema.LoadModelRequest{Name: specification.name}); err != nil {
+		return "", fmt.Errorf("load %s: %w", specification.name, err)
+	}
+	return checksum, nil
+}
+
+func cachedModelChecksum(ctx context.Context, runtime *llama.Llama, specification modelSpecification) (string, error) {
+	modelFile, err := runtime.GetModel(ctx, specification.name)
+	if err != nil {
+		return "", err
+	}
+	return verifyModelOrRemove(runtime.Store.Path(), modelFile.Path, specification.sha256)
+}
+
+func downloadModel(ctx context.Context, runtime *llama.Llama, specification modelSpecification) (string, error) {
+	log.Printf("startup: downloading model %s", specification.name)
+	lastPercentage := -1
+	modelFile, err := runtime.PullModel(ctx, schema.PullModelRequest{URL: specification.url}, func(_ string, downloaded, total uint64) error {
+		if total > 0 {
+			percentage := int(downloaded * 100 / total)
+			if percentage > lastPercentage {
+				lastPercentage = percentage
+				log.Printf("startup: download %s: %d%%", specification.name, percentage)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", specification.name, err)
+	}
+	checksum, err := verifyModelOrRemove(runtime.Store.Path(), modelFile.Path, specification.sha256)
+	if err != nil {
+		return "", fmt.Errorf("verify %s: %w", specification.name, err)
+	}
+	return checksum, nil
+}
+
+func verifyModelOrRemove(directory, filename, expectedChecksum string) (string, error) {
+	modelPath := filepath.Join(directory, filename)
+	checksum, err := verifiedSHA256(modelPath, expectedChecksum)
+	if err != nil {
+		_ = os.Remove(modelPath)
+	}
+	return checksum, err
 }
 
 func (engine *Llama) Embed(ctx context.Context, texts []string) ([][]float32, error) {
@@ -203,7 +241,12 @@ func (engine *Llama) ValidateEmbedding(ctx context.Context) error {
 
 func (engine *Llama) SHA256() string { return engine.embedSHA256 }
 
+func (engine *Llama) GenerationSHA256() string { return engine.chatSHA256 }
+
 func (engine *Llama) Generate(ctx context.Context, prompt string) (string, error) {
+	if engine.chatName == "" {
+		return "", errors.New("local generation model is not configured")
+	}
 	contextSize := uint32(chatContextSize)
 	batchSize := uint32(chatBatchSize)
 	generatedText := ""
@@ -212,42 +255,69 @@ func (engine *Llama) Generate(ctx context.Context, prompt string) (string, error
 		ContextSize:      &contextSize,
 		BatchSize:        &batchSize,
 		UBatchSize:       &batchSize,
-	}, func(_ context.Context, task *llama.Task) error {
+	}, func(ctx context.Context, task *llama.Task) error {
 		task.CachedModel().Lock()
 		defer task.CachedModel().Unlock()
-		tokenOptions := llamasys.DefaultTokenizeOptions()
-		tokenOptions.AddSpecial = true
-		tokenOptions.ParseSpecial = true
-		tokens, err := task.Model().Tokenize(qwenChatMLPrompt(prompt), tokenOptions)
+		tokens, err := tokenizeChatPrompt(task.Model(), prompt)
 		if err != nil {
 			return err
 		}
 		if len(tokens)+chatOutputTokens > int(contextSize) {
 			return fmt.Errorf("digest prompt exceeds context budget: %d tokens", len(tokens))
 		}
-		if err := decodePrompt(task, tokens, int(batchSize)); err != nil {
+		if err := decodePrompt(ctx, task, tokens, int(batchSize)); err != nil {
 			return err
 		}
 		generatedText, err = sampleResponse(ctx, task, tokens)
+		generatedText = llama.ParseReasoning(generatedText).Content
 		return err
 	})
 	return generatedText, err
+}
+
+func tokenizeChatPrompt(chatModel *llamasys.Model, prompt string) ([]llamasys.Token, error) {
+	const contentMarker = "RagfyPromptContent"
+	if !chatModel.HasChatTemplate() {
+		return nil, errors.New("local generation model has no chat template")
+	}
+	template, err := llamasys.ApplyTemplateWithModel(chatModel, "", []llamasys.ChatMessage{{Role: "user", Content: contentMarker}}, true)
+	if err != nil {
+		return nil, fmt.Errorf("apply local generation chat template: %w", err)
+	}
+	before, after, ok := strings.Cut(template, contentMarker)
+	if !ok || strings.Contains(after, contentMarker) {
+		return nil, errors.New("local generation model has an unsupported chat template")
+	}
+	tokenOptions := llamasys.DefaultTokenizeOptions()
+	tokenOptions.AddSpecial = true
+	tokenOptions.ParseSpecial = true
+	prefix, err := chatModel.Tokenize(before, tokenOptions)
+	if err != nil {
+		return nil, err
+	}
+	tokenOptions.AddSpecial = false
+	tokenOptions.ParseSpecial = false
+	content, err := chatModel.Tokenize(prompt, tokenOptions)
+	if err != nil {
+		return nil, err
+	}
+	tokenOptions.ParseSpecial = true
+	suffix, err := chatModel.Tokenize(after, tokenOptions)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(prefix, content...), suffix...), nil
 }
 
 func (engine *Llama) Close() error {
 	return engine.runtime.Close()
 }
 
-func modelSpecifications(config appconfig.EmbeddingConfig) []modelSpecification {
-	return []modelSpecification{{chatModel, chatURL, chatSHA256}, embeddingModelSpecification(config)}
-}
-
-func embeddingModelSpecification(config appconfig.EmbeddingConfig) modelSpecification {
-	return modelSpecification{config.Name(), config.URI, config.SHA256}
-}
-
-func decodePrompt(task *llama.Task, tokens []llamasys.Token, batchSize int) error {
+func decodePrompt(ctx context.Context, task *llama.Task, tokens []llamasys.Token, batchSize int) error {
 	for _, bounds := range tokenChunks(len(tokens), batchSize) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		lastBatch := bounds[1] == len(tokens)
 		batch, err := llamasys.BatchFromTokens(tokens[bounds[0]:bounds[1]], int32(bounds[0]), 0, lastBatch)
 		if err != nil {
@@ -264,7 +334,7 @@ func decodePrompt(task *llama.Task, tokens []llamasys.Token, batchSize int) erro
 
 func sampleResponse(ctx context.Context, task *llama.Task, promptTokens []llamasys.Token) (string, error) {
 	parameters := llamasys.DefaultSamplerParams()
-	parameters.Temperature, parameters.TopP, parameters.TopK = 0.7, 0.8, 20
+	parameters.Temperature, parameters.TopP, parameters.TopK = 0.1, 0.8, 20
 	sampler, err := llamasys.NewSampler(task.Model(), parameters)
 	if err != nil {
 		return "", err
@@ -300,10 +370,6 @@ func sampleResponse(ctx context.Context, task *llama.Task, promptTokens []llamas
 	return "", errors.New("digest output exceeded token budget")
 }
 
-func qwenChatMLPrompt(userPrompt string) string {
-	return "<|im_start|>user\n" + userPrompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-}
-
 func tokenChunks(total, size int) [][2]int {
 	if total <= 0 || size <= 0 {
 		return nil
@@ -315,18 +381,15 @@ func tokenChunks(total, size int) [][2]int {
 	return chunks
 }
 
-func verifyFile(path, expectedSHA256 string) error {
-	if expectedSHA256 == "" {
-		return nil
-	}
+func verifiedSHA256(path, expectedSHA256 string) (string, error) {
 	actualSHA256, err := fileSHA256(path)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if actualSHA256 != expectedSHA256 {
-		return fmt.Errorf("SHA-256 mismatch: got %s", actualSHA256)
+	if expectedSHA256 != "" && !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return "", fmt.Errorf("SHA-256 mismatch: got %s", actualSHA256)
 	}
-	return nil
+	return actualSHA256, nil
 }
 
 func truncate(text string, maximumLength int) string {

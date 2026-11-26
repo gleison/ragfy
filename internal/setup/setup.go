@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,15 +41,17 @@ func Run(ctx context.Context, executable string, input io.Reader, output io.Writ
 	}
 
 	fmt.Fprintln(output, "\nValidating embedding model (it will be downloaded if absent)…")
-	engine, err := model.NewEmbeddingLlamaWithConfig(ctx, filepath.Join(dataDirectory, "models"), selected.Embedding)
+	if selected.Generation != nil {
+		fmt.Fprintln(output, "Preparing local generation model (it will be downloaded if absent)…")
+	}
+	engine, err := model.NewLlamaWithConfig(ctx, filepath.Join(dataDirectory, "models"), selected)
 	if err != nil {
-		return fmt.Errorf("validate embedding model: %w", err)
+		return fmt.Errorf("prepare models: %w", err)
 	}
-	if err := engine.ValidateEmbedding(ctx); err != nil {
+	if err := validateAndPinModels(ctx, engine, &selected, output); err != nil {
 		engine.Close()
-		return fmt.Errorf("model cannot be used for embeddings: %w", err)
+		return err
 	}
-	selected.Embedding.SHA256 = engine.SHA256()
 	if err := engine.Close(); err != nil {
 		return err
 	}
@@ -72,6 +75,43 @@ func Run(ctx context.Context, executable string, input io.Reader, output io.Writ
 		return err
 	}
 	fmt.Fprintln(output, "Restart active Codex or Claude Code sessions so they reload the updated hook commands.")
+	return nil
+}
+
+type setupModelRuntime interface {
+	model.Generator
+	ValidateEmbedding(context.Context) error
+	SHA256() string
+	GenerationSHA256() string
+}
+
+func validateAndPinModels(ctx context.Context, runtime setupModelRuntime, config *appconfig.Config, output io.Writer) error {
+	if err := runtime.ValidateEmbedding(ctx); err != nil {
+		return fmt.Errorf("model cannot be used for embeddings: %w", err)
+	}
+	config.Embedding.SHA256 = runtime.SHA256()
+	if config.Generation == nil {
+		return nil
+	}
+	if err := validateGeneration(ctx, runtime); err != nil {
+		return err
+	}
+	config.Generation.SHA256 = runtime.GenerationSHA256()
+	fmt.Fprintln(output, "✓ Local generation model validated")
+	return nil
+}
+
+func validateGeneration(ctx context.Context, generator model.Generator) error {
+	response, err := generator.Generate(ctx, `Return exactly this JSON object with no markdown: {"ready":true}`)
+	if err != nil {
+		return fmt.Errorf("validate local generation model: %w", err)
+	}
+	var result struct {
+		Ready bool `json:"ready"`
+	}
+	if err := json.Unmarshal([]byte(response), &result); err != nil || !result.Ready {
+		return errors.New("local generation model did not return the expected validation JSON")
+	}
 	return nil
 }
 

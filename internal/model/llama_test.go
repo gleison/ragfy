@@ -26,10 +26,10 @@ func TestVerifyFileDetectsChecksumMismatch(t *testing.T) {
 	if err := os.WriteFile(path, contents, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyFile(path, "2b5bd846a7cc2c5a04cbbe4977aabb35992530f430dc895ff6965864ffbae75a"); err != nil {
+	if _, err := verifiedSHA256(path, "2b5bd846a7cc2c5a04cbbe4977aabb35992530f430dc895ff6965864ffbae75a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyFile(path, strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
+	if _, err := verifiedSHA256(path, strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
 		t.Fatalf("checksum mismatch error = %v", err)
 	}
 }

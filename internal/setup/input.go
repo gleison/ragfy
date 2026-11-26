@@ -49,7 +49,58 @@ func askConfiguration(input io.Reader, output io.Writer, current appconfig.Confi
 		}
 	}
 	result := appconfig.Config{Version: appconfig.CurrentVersion, Embedding: embedding, Integrations: integrations}
+	result.Generation, err = askGenerationConfig(reader, output, current.Generation)
+	if err != nil {
+		return appconfig.Config{}, err
+	}
 	return result, result.Validate()
+}
+
+func askGenerationConfig(input *bufio.Reader, output io.Writer, current *appconfig.GenerationConfig) (*appconfig.GenerationConfig, error) {
+	mode := "harness"
+	if current != nil {
+		mode = "local"
+	}
+	fmt.Fprintf(output, "\nKnowledge generation (harness or local) [%s]: ", mode)
+	choice, err := readLine(input)
+	if err != nil {
+		return nil, err
+	}
+	if choice != "" {
+		mode = strings.ToLower(choice)
+	}
+	switch mode {
+	case "harness":
+		return nil, nil
+	case "local":
+		return askGenerationModel(input, output, current)
+	default:
+		return nil, fmt.Errorf("unknown knowledge generation mode %q", mode)
+	}
+}
+
+func askGenerationModel(input *bufio.Reader, output io.Writer, current *appconfig.GenerationConfig) (*appconfig.GenerationConfig, error) {
+	generation := appconfig.DefaultGenerationConfig()
+	label := appconfig.DefaultGenerationModel
+	if current != nil && current.URI != generation.URI {
+		generation = *current
+		label = generation.URI
+	}
+	fmt.Fprintf(output, "Generation model (instruct GGUF URI) [%s]: ", label)
+	uri, err := readLine(input)
+	if err != nil {
+		return nil, err
+	}
+	switch uri {
+	case "":
+	case appconfig.DefaultGenerationModel, appconfig.DefaultGenerationURI:
+		generation = appconfig.DefaultGenerationConfig()
+	default:
+		if uri != generation.URI {
+			generation = appconfig.GenerationConfig{URI: uri}
+		}
+	}
+	return &generation, nil
 }
 
 func readLine(reader *bufio.Reader) (string, error) {

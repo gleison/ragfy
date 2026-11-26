@@ -39,17 +39,18 @@ const (
 )
 
 type Service struct {
-	repository  knowledge.Repository
-	embedder    model.Embedder
-	extractor   extraction.Extractor
-	retriever   retrieval.Retriever
-	reconciler  reconciliation.Reconciler
-	queue       chan api.HookPayload
-	digestLock  sync.Mutex
-	contextLock sync.Mutex
-	contextSeen map[string]map[string]bool
-	startedAt   time.Time
-	runtime     RuntimeInfo
+	repository        knowledge.Repository
+	embedder          model.Embedder
+	extractor         extraction.Extractor
+	retriever         retrieval.Retriever
+	reconciler        reconciliation.Reconciler
+	deduplicateSource bool
+	queue             chan api.HookPayload
+	digestLock        sync.Mutex
+	contextLock       sync.Mutex
+	contextSeen       map[string]map[string]bool
+	startedAt         time.Time
+	runtime           RuntimeInfo
 }
 
 type RuntimeInfo struct {
@@ -59,12 +60,13 @@ type RuntimeInfo struct {
 }
 
 type Dependencies struct {
-	Repository knowledge.Repository
-	Embedder   model.Embedder
-	Extractor  extraction.Extractor
-	Retriever  retrieval.Retriever
-	Reconciler reconciliation.Reconciler
-	Runtime    RuntimeInfo
+	Repository        knowledge.Repository
+	Embedder          model.Embedder
+	Extractor         extraction.Extractor
+	Retriever         retrieval.Retriever
+	Reconciler        reconciliation.Reconciler
+	DeduplicateSource bool
+	Runtime           RuntimeInfo
 }
 
 func New(dependencies Dependencies) *Service {
@@ -77,15 +79,16 @@ func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service
 		reconciler = reconciliation.None{}
 	}
 	return &Service{
-		repository:  dependencies.Repository,
-		embedder:    dependencies.Embedder,
-		extractor:   dependencies.Extractor,
-		retriever:   dependencies.Retriever,
-		reconciler:  reconciler,
-		queue:       make(chan api.HookPayload, queueCapacity),
-		contextSeen: make(map[string]map[string]bool),
-		startedAt:   time.Now(),
-		runtime:     dependencies.Runtime,
+		repository:        dependencies.Repository,
+		embedder:          dependencies.Embedder,
+		extractor:         dependencies.Extractor,
+		retriever:         dependencies.Retriever,
+		reconciler:        reconciler,
+		deduplicateSource: dependencies.DeduplicateSource,
+		queue:             make(chan api.HookPayload, queueCapacity),
+		contextSeen:       make(map[string]map[string]bool),
+		startedAt:         time.Now(),
+		runtime:           dependencies.Runtime,
 	}
 }
 
@@ -578,6 +581,10 @@ func (service *Service) processSource(ctx context.Context, source knowledge.Sour
 	if err := service.prepareDocuments(ctx, documents, source); err != nil {
 		return 0, err
 	}
+	documents, err = service.deduplicateSourceDocuments(ctx, documents, source)
+	if err != nil {
+		return 0, err
+	}
 	stored, err := service.repository.Documents(ctx)
 	if err != nil {
 		return 0, err
@@ -747,6 +754,10 @@ func (service *Service) Digest(ctx context.Context, payload api.HookPayload) err
 	if err := service.prepareDocuments(ctx, documents, source); err != nil {
 		return err
 	}
+	documents, err = service.deduplicateSourceDocuments(ctx, documents, source)
+	if err != nil {
+		return err
+	}
 	for index := range documents {
 		documents[index].Metadata["transcript_hash"] = transcriptHash
 	}
@@ -775,6 +786,65 @@ const (
 type scoredDocument struct {
 	document knowledge.Document
 	score    float64
+}
+
+func (service *Service) deduplicateSourceDocuments(ctx context.Context, documents []knowledge.Document, source knowledge.Source) ([]knowledge.Document, error) {
+	if !service.deduplicateSource || len(documents) < 2 {
+		return documents, nil
+	}
+	sort.SliceStable(documents, func(firstIndex, secondIndex int) bool {
+		firstClaim, _, _ := strings.Cut(documents[firstIndex].Content, "\n")
+		secondClaim, _, _ := strings.Cut(documents[secondIndex].Content, "\n")
+		return len(firstClaim) > len(secondClaim)
+	})
+	uniqueDocuments := documents[:0]
+	for _, candidate := range documents {
+		duplicate, err := duplicateOfRetainedDocument(ctx, service.reconciler, source, candidate, uniqueDocuments)
+		if err != nil {
+			return nil, err
+		}
+		if !duplicate {
+			uniqueDocuments = append(uniqueDocuments, candidate)
+		}
+	}
+	if removed := len(documents) - len(uniqueDocuments); removed > 0 {
+		log.Printf("source %s: removed %d duplicate records from the same source", source.ID, removed)
+	}
+	return uniqueDocuments, nil
+}
+
+func duplicateOfRetainedDocument(ctx context.Context, reconciler reconciliation.Reconciler, source knowledge.Source, candidate knowledge.Document, retainedDocuments []knowledge.Document) (bool, error) {
+	for _, retained := range retainedDocuments {
+		if candidate.Kind == "problem" || candidate.Kind != retained.Kind || candidate.Scope != retained.Scope {
+			continue
+		}
+		if candidate.SourceID == retained.SourceID {
+			return true, nil
+		}
+		if !sharesEvidence(candidate, retained) && vectorSimilarity(candidate.Vector, retained.Vector) < reconciliationSimilarity {
+			continue
+		}
+		actions, err := reconciler.Reconcile(ctx, reconciliation.Request{
+			SessionID: source.ID, Provider: source.Provider, Project: source.Project, WithinSource: true,
+			New: []knowledge.Document{candidate}, Existing: []knowledge.Document{retained},
+		})
+		if err != nil {
+			return false, fmt.Errorf("compare extracted records from the same source: %w", err)
+		}
+		for _, action := range actions {
+			if action.Relation == reconciliation.RelationDuplicate && action.NewSourceID == candidate.SourceID && action.ExistingSourceID == retained.SourceID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func sharesEvidence(first, second knowledge.Document) bool {
+	firstEvidence := metadataString(first.Metadata, "evidence")
+	secondEvidence := metadataString(second.Metadata, "evidence")
+	return firstEvidence != "" && secondEvidence != "" &&
+		(strings.Contains(firstEvidence, secondEvidence) || strings.Contains(secondEvidence, firstEvidence))
 }
 
 func reconciliationCandidates(newDocuments, stored []knowledge.Document, source knowledge.Source) []knowledge.Document {

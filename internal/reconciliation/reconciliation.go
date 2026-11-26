@@ -14,11 +14,12 @@ const (
 )
 
 type Request struct {
-	SessionID string
-	Provider  string
-	Project   string
-	New       []knowledge.Document
-	Existing  []knowledge.Document
+	SessionID    string
+	Provider     string
+	Project      string
+	New          []knowledge.Document
+	Existing     []knowledge.Document
+	WithinSource bool
 }
 
 type Action struct {

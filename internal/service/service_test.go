@@ -918,3 +918,70 @@ func TestRecallReturnsEmptyContextWhenEmbeddingFails(t *testing.T) {
 		t.Fatalf("embedding failure response = %d %q", response.Code, response.Body.String())
 	}
 }
+
+func TestLocalDigestKeepsOneProjectFactAndExplicitDecision(t *testing.T) {
+	ctx := context.Background()
+	repo := openTestRepository(t)
+	const (
+		evidence   = "O Ragfy reaproveita o gerador llama.cpp e o cache dos embeddings para extrair e reconciliar conhecimento."
+		decision   = "O modelo padrão sugerido no setup deve ser qwen3:4b-instruct-2507-q8_0."
+		distinct   = "A configuração usa harness por padrão nas instalações existentes."
+		preference = "Prefiro respostas curtas em todos os projetos."
+	)
+	response := fmt.Sprintf(`{"problems":[],"facts":[
+		{"fact":"O Ragfy usa llama.cpp e o cache GGUF para extração e reconciliação no modo local.","evidence":%q,"visibility":"global"},
+		{"fact":"A extração local chama diretamente o runtime llama.cpp com o cache GGUF.","evidence":%q,"visibility":"global"},
+		{"fact":%q,"evidence":%q,"visibility":"project"}],
+		"preferences":[{"preference":%q,"evidence":%q,"acceptance":"explicit","visibility":"global"}],
+		"decisions":[{"decision":%q,"evidence":%q,"acceptance":"explicit","visibility":"project"}]}`,
+		evidence, evidence+" "+distinct,
+		distinct, distinct, preference, preference, decision, decision)
+	models := &fakeModelEngine{generated: []string{response}}
+	service := New(Dependencies{
+		Repository: repo, Embedder: models, Extractor: extraction.NewLocalGenerative(models),
+		Reconciler: sourceRegressionReconciler{}, DeduplicateSource: true,
+	})
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	writeCodexTranscript(t, transcript, decision+" "+preference, evidence+" "+distinct+" "+strings.Repeat("Additional context. ", 20))
+	if err := service.Digest(ctx, api.HookPayload{SessionID: "local-regression", Source: "codex", Transcript: transcript, CWD: "/workspace/ragfy"}); err != nil {
+		t.Fatal(err)
+	}
+	documents, err := repo.Documents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 4 {
+		t.Fatalf("expected two distinct facts, one decision and one preference, got %d", len(documents))
+	}
+	var hasDecision bool
+	for _, document := range documents {
+		hasDecision = hasDecision || document.Kind == "decision" && strings.Contains(document.Content, decision)
+		switch {
+		case document.Kind == "preference":
+			if document.Scope != knowledge.ScopeGlobal || document.Project != "" {
+				t.Fatalf("preference scope = %s, project = %q", document.Scope, document.Project)
+			}
+		case document.Scope != knowledge.ScopeProject || document.Project != "ragfy":
+			t.Fatalf("record escaped project scope: %s", document.Content)
+		case strings.HasPrefix(document.Content, "A extração local"):
+			t.Fatalf("stored redundant paraphrase: %s", document.Content)
+		}
+	}
+	if !hasDecision {
+		t.Fatal("explicit model choice was not saved as a decision")
+	}
+}
+
+type sourceRegressionReconciler struct{}
+
+func (sourceRegressionReconciler) Reconcile(_ context.Context, request reconciliation.Request) ([]reconciliation.Action, error) {
+	if !request.WithinSource {
+		return nil, nil
+	}
+	first := request.New[0]
+	second := request.Existing[0]
+	if strings.Contains(first.Content, "llama.cpp") && strings.Contains(second.Content, "llama.cpp") {
+		return []reconciliation.Action{{NewSourceID: first.SourceID, ExistingSourceID: second.SourceID, Relation: reconciliation.RelationDuplicate}}, nil
+	}
+	return nil, nil
+}
