@@ -479,12 +479,11 @@ func serve() (resultErr error) {
 		return err
 	}
 	applicationService := service.New(service.Dependencies{
-		Repository:        repository,
-		Embedder:          embedder,
-		Extractor:         extractor,
-		Retriever:         retrieval.NewHybrid(repository),
-		Reconciler:        reconciler,
-		DeduplicateSource: configuration.Generation != nil,
+		Repository: repository,
+		Embedder:   embedder,
+		Extractor:  extractor,
+		Retriever:  retrieval.NewHybrid(repository),
+		Reconciler: reconciler,
 		Runtime: service.RuntimeInfo{
 			Version: buildinfo.DisplayVersion(),
 			Model:   configuration.Embedding.Name(),

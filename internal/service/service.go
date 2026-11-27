@@ -39,18 +39,17 @@ const (
 )
 
 type Service struct {
-	repository        knowledge.Repository
-	embedder          model.Embedder
-	extractor         extraction.Extractor
-	retriever         retrieval.Retriever
-	reconciler        reconciliation.Reconciler
-	deduplicateSource bool
-	queue             chan api.HookPayload
-	digestLock        sync.Mutex
-	contextLock       sync.Mutex
-	contextSeen       map[string]map[string]bool
-	startedAt         time.Time
-	runtime           RuntimeInfo
+	repository  knowledge.Repository
+	embedder    model.Embedder
+	extractor   extraction.Extractor
+	retriever   retrieval.Retriever
+	reconciler  reconciliation.Reconciler
+	queue       chan api.HookPayload
+	digestLock  sync.Mutex
+	contextLock sync.Mutex
+	contextSeen map[string]map[string]bool
+	startedAt   time.Time
+	runtime     RuntimeInfo
 }
 
 type RuntimeInfo struct {
@@ -60,13 +59,12 @@ type RuntimeInfo struct {
 }
 
 type Dependencies struct {
-	Repository        knowledge.Repository
-	Embedder          model.Embedder
-	Extractor         extraction.Extractor
-	Retriever         retrieval.Retriever
-	Reconciler        reconciliation.Reconciler
-	DeduplicateSource bool
-	Runtime           RuntimeInfo
+	Repository knowledge.Repository
+	Embedder   model.Embedder
+	Extractor  extraction.Extractor
+	Retriever  retrieval.Retriever
+	Reconciler reconciliation.Reconciler
+	Runtime    RuntimeInfo
 }
 
 func New(dependencies Dependencies) *Service {
@@ -79,16 +77,15 @@ func NewWithQueueCapacity(dependencies Dependencies, queueCapacity int) *Service
 		reconciler = reconciliation.None{}
 	}
 	return &Service{
-		repository:        dependencies.Repository,
-		embedder:          dependencies.Embedder,
-		extractor:         dependencies.Extractor,
-		retriever:         dependencies.Retriever,
-		reconciler:        reconciler,
-		deduplicateSource: dependencies.DeduplicateSource,
-		queue:             make(chan api.HookPayload, queueCapacity),
-		contextSeen:       make(map[string]map[string]bool),
-		startedAt:         time.Now(),
-		runtime:           dependencies.Runtime,
+		repository:  dependencies.Repository,
+		embedder:    dependencies.Embedder,
+		extractor:   dependencies.Extractor,
+		retriever:   dependencies.Retriever,
+		reconciler:  reconciler,
+		queue:       make(chan api.HookPayload, queueCapacity),
+		contextSeen: make(map[string]map[string]bool),
+		startedAt:   time.Now(),
+		runtime:     dependencies.Runtime,
 	}
 }
 
@@ -789,7 +786,7 @@ type scoredDocument struct {
 }
 
 func (service *Service) deduplicateSourceDocuments(ctx context.Context, documents []knowledge.Document, source knowledge.Source) ([]knowledge.Document, error) {
-	if !service.deduplicateSource || len(documents) < 2 {
+	if len(documents) < 2 {
 		return documents, nil
 	}
 	sort.SliceStable(documents, func(firstIndex, secondIndex int) bool {

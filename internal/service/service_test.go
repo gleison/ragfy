@@ -939,7 +939,7 @@ func TestLocalDigestKeepsOneProjectFactAndExplicitDecision(t *testing.T) {
 	models := &fakeModelEngine{generated: []string{response}}
 	service := New(Dependencies{
 		Repository: repo, Embedder: models, Extractor: extraction.NewLocalGenerative(models),
-		Reconciler: sourceRegressionReconciler{}, DeduplicateSource: true,
+		Reconciler: sourceRegressionReconciler{},
 	})
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
 	writeCodexTranscript(t, transcript, decision+" "+preference, evidence+" "+distinct+" "+strings.Repeat("Additional context. ", 20))
